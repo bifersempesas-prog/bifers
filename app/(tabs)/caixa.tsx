@@ -11,11 +11,12 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { formatarMoeda } from '../../utils/formatters';
 import { useFocusEffect } from '@react-navigation/native';
+import { useAuth } from '../../contexts/AuthContext';
+import ModalReciboProlabore from '../../components/modals/ModalReciboProlabore';
 
 type PeriodoPDF = 'TUDO' | 'HOJE' | 'MES' | 'CUSTOM';
 type TipoLancamento = 'ENTRADA' | 'SAIDA';
 
-// ─── Estrutura real do contrato com dados relacionados ───────────────────────
 interface ContratoRelatorio {
   id: string;
   cliente_id: string;
@@ -32,16 +33,13 @@ interface ContratoRelatorio {
   numero_contrato?: string;
   garantia?: string;
   comissionados_detalhes?: any[];
-  // Dados calculados após JOIN
   nomeCliente: string;
   telefoneCliente: string;
-  // Dados calculados a partir de movimentações
   jurosRecebidos: number;
   comissoesPagas: number;
   qtdPagamentos: number;
 }
 
-// ─── Estrutura de comissão por parceiro ──────────────────────────────────────
 interface ResumoComissionado {
   nome: string;
   totalAcordado: number;
@@ -50,6 +48,10 @@ interface ResumoComissionado {
 
 export default function CaixaScreen() {
   const { moedaGlobal } = useMoeda();
+  const { usuarioAtual, temPermissao } = useAuth();
+
+  // ── Modal Recibo ───────────────────────────────────────────────────────────
+  const [modalReciboVisivel, setModalReciboVisivel] = useState(false);
 
   // ── Caixa ──────────────────────────────────────────────────────────────────
   const [valor, setValor] = useState('');
@@ -80,9 +82,6 @@ export default function CaixaScreen() {
   const [dataInicioLucros, setDataInicioLucros] = useState('');
   const [dataFimLucros, setDataFimLucros] = useState('');
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // CAIXA — carga de dados
-  // ─────────────────────────────────────────────────────────────────────────
   const carregarSaldo = async () => {
     setLoading(true);
     try {
@@ -108,13 +107,9 @@ export default function CaixaScreen() {
     }
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LUCROS / COMISSÕES — carga de dados REAL
-  // ─────────────────────────────────────────────────────────────────────────
   const carregarLucros = async () => {
     setLoadingLucros(true);
     try {
-      // 1. Buscar contratos da moeda ativa
       const { data: contratos, error: errContratos } = await supabase
         .from('contratos')
         .select('*')
@@ -128,7 +123,6 @@ export default function CaixaScreen() {
         return;
       }
 
-      // 2. Buscar clientes para ter os nomes
       const clienteIds = [...new Set(contratos.map(c => c.cliente_id).filter(Boolean))];
       const { data: clientes } = await supabase
         .from('clientes')
@@ -138,7 +132,6 @@ export default function CaixaScreen() {
       const mapaClientes: Record<string, any> = {};
       clientes?.forEach(c => { mapaClientes[c.id] = c; });
 
-      // 3. Buscar movimentações reais (juros e comissões já pagos)
       const contratoIds = contratos.map(c => c.id);
       const { data: movs } = await supabase
         .from('movimentacoes_contrato')
@@ -146,7 +139,6 @@ export default function CaixaScreen() {
         .in('contrato_id', contratoIds)
         .eq('tipo_acao', 'PAGAMENTO');
 
-      // Agrupa movimentações por contrato
       const mapaMovs: Record<string, { juros: number; comissao: number; qtd: number }> = {};
       movs?.forEach(m => {
         if (!mapaMovs[m.contrato_id]) {
@@ -157,7 +149,6 @@ export default function CaixaScreen() {
         mapaMovs[m.contrato_id].qtd += 1;
       });
 
-      // 4. Montar lista enriquecida
       const listaEnriquecida: ContratoRelatorio[] = contratos.map(c => {
         const cliente = mapaClientes[c.cliente_id] || {};
         const movContrato = mapaMovs[c.id] || { juros: 0, comissao: 0, qtd: 0 };
@@ -173,11 +164,9 @@ export default function CaixaScreen() {
 
       setListaContratos(listaEnriquecida);
 
-      // 5. Calcular resumo por comissionado a partir de comissionados_detalhes
       const mapaComissionados: Record<string, ResumoComissionado> = {};
       listaEnriquecida.forEach(c => {
         const detalhes = c.comissionados_detalhes || [];
-        const qtd = c.quantidade_parcelas || 1;
         detalhes.forEach((d: any) => {
           const nome = d.nome || 'Parceiro';
           const totalAcordado = d.tipoComissao === 'PERCENTUAL'
@@ -206,9 +195,6 @@ export default function CaixaScreen() {
     }, [moedaGlobal])
   );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // HELPERS
-  // ─────────────────────────────────────────────────────────────────────────
   const formatarData = (text: string, setFunc: (v: string) => void) => {
     let t = text.replace(/\D/g, '');
     if (t.length > 2) t = t.replace(/(\d{2})(\d)/, '$1/$2');
@@ -216,19 +202,16 @@ export default function CaixaScreen() {
     setFunc(t.substring(0, 10));
   };
 
-  // Lucro previsto total de um contrato = (parcelas × valor_parcela) - principal
   const calcularLucroPrevisto = (c: ContratoRelatorio): number => {
     const totalEsperado = (c.quantidade_parcelas || 1) * (c.valor_parcela || 0);
     const lucro = totalEsperado - Number(c.valor_principal);
     return lucro > 0 ? lucro : 0;
   };
 
-  // Lucro a receber = previsto - já recebido
   const calcularLucroAReceber = (c: ContratoRelatorio): number => {
     return Math.max(calcularLucroPrevisto(c) - c.jurosRecebidos, 0);
   };
 
-  // Totais consolidados usando dados reais
   const totaisLucros = useCallback(() => {
     return listaContratos.reduce(
       (acc, c) => {
@@ -255,9 +238,6 @@ export default function CaixaScreen() {
     return '#95a5a6';
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LANÇAR NO CAIXA
-  // ─────────────────────────────────────────────────────────────────────────
   const handleLancarCaixa = async () => {
     if (!valor) return Alert.alert('Erro', 'Digite um valor!');
     if (dataLancamento.length !== 10) return Alert.alert('Erro', 'Digite uma data completa (DD/MM/AAAA)');
@@ -265,183 +245,133 @@ export default function CaixaScreen() {
     const valorTratado = parseFloat(valor.replace(',', '.'));
     if (isNaN(valorTratado) || valorTratado <= 0) return Alert.alert('Erro', 'Valor inválido!');
 
-    const [dia, mes, ano] = dataLancamento.split('/');
-    const dataFinalParaBanco = new Date(Number(ano), Number(mes) - 1, Number(dia), new Date().getHours(), new Date().getMinutes());
+    const [d, m, y] = dataLancamento.split('/');
+    const dataFinal = new Date(Number(y), Number(m) - 1, Number(d), 12, 0, 0).toISOString();
 
-    const { error } = await supabase.from('fluxo_pessoal').insert([{
-      tipo: tipoLancamento,
-      valor: valorTratado,
-      moeda: moedaGlobal,
-      descricao: descricao || (tipoLancamento === 'ENTRADA' ? 'Aporte / Adição de Saldo' : 'Retirada / Despesa'),
-      created_at: dataFinalParaBanco.toISOString(),
-    }]);
+    setLoading(true);
+    try {
+      const { error } = await supabase.from('fluxo_pessoal').insert({
+        tipo: tipoLancamento,
+        valor: valorTratado,
+        descricao: descricao || (tipoLancamento === 'ENTRADA' ? 'Entrada Manual' : 'Saída Manual'),
+        moeda: moedaGlobal,
+        created_at: dataFinal
+      });
 
-    if (error) {
-      Alert.alert('Erro no Banco', error.message);
-    } else {
-      Alert.alert('Sucesso', `Lançamento salvo no caixa de ${moedaGlobal}!`);
+      if (error) throw error;
+      Alert.alert('Sucesso', 'Lançamento realizado!');
       setValor('');
       setDescricao('');
-      setDataLancamento(new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }));
       carregarSaldo();
-    }
-  };
-
-  const deletarLancamento = (id: string) => {
-    Alert.alert('Excluir Lançamento', 'Deseja realmente apagar este registro?', [
-      { text: 'Cancelar', style: 'cancel' },
-      {
-        text: 'Excluir', style: 'destructive',
-        onPress: async () => {
-          await supabase.from('fluxo_pessoal').delete().eq('id', id);
-          carregarSaldo();
-        },
-      },
-    ]);
-  };
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // FILTRO LISTA CAIXA
-  // ─────────────────────────────────────────────────────────────────────────
-  const listaCaixaFiltrada = listaCaixa.filter(item => {
-    if (filtroPeriodo === 'TUDO') return true;
-    const dataItem = new Date(item.created_at);
-    const hoje = new Date();
-    if (filtroPeriodo === 'HOJE') {
-      return dataItem.getDate() === hoje.getDate() && dataItem.getMonth() === hoje.getMonth() && dataItem.getFullYear() === hoje.getFullYear();
-    }
-    if (filtroPeriodo === 'MES') {
-      return dataItem.getMonth() === hoje.getMonth() && dataItem.getFullYear() === hoje.getFullYear();
-    }
-    return true;
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // PDF — CAIXA
-  // ─────────────────────────────────────────────────────────────────────────
-  const gerarPDF = async (periodoEscolhido: PeriodoPDF) => {
-    let startDate: Date = new Date(), endDate: Date = new Date();
-    let tituloPeriodo: string = periodoEscolhido;
-
-    if (periodoEscolhido === 'CUSTOM') {
-      if (dataInicio.length !== 10 || dataFim.length !== 10)
-        return Alert.alert('Erro', 'Preencha as datas completamente (DD/MM/AAAA).');
-      const [d1, m1, y1] = dataInicio.split('/');
-      const [d2, m2, y2] = dataFim.split('/');
-      startDate = new Date(Number(y1), Number(m1) - 1, Number(d1), 0, 0, 0);
-      endDate = new Date(Number(y2), Number(m2) - 1, Number(d2), 23, 59, 59);
-      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()))
-        return Alert.alert('Erro', 'Data inválida.');
-      tituloPeriodo = `${dataInicio} a ${dataFim}`;
-    }
-
-    setModalPdfVisivel(false);
-    setMostrarFormCustom(false);
-    setLoading(true);
-
-    const listaParaPDF = listaCaixa.filter(item => {
-      if (periodoEscolhido === 'TUDO') return true;
-      const dataItem = new Date(item.created_at);
-      const hoje = new Date();
-      if (periodoEscolhido === 'HOJE') return dataItem.toDateString() === hoje.toDateString();
-      if (periodoEscolhido === 'MES') return dataItem.getMonth() === hoje.getMonth() && dataItem.getFullYear() === hoje.getFullYear();
-      if (periodoEscolhido === 'CUSTOM') return dataItem >= startDate && dataItem <= endDate;
-      return true;
-    });
-
-    const saldoDoPeriodo = listaParaPDF.reduce((acc, curr) => {
-      const v = Number(curr.valor) || 0;
-      return curr.tipo === 'ENTRADA' ? acc + v : acc - v;
-    }, 0);
-
-    const html = `
-    <html><head><style>
-      body{font-family:Helvetica,sans-serif;padding:20px;color:#2c3e50}
-      .header{text-align:center;border-bottom:2px solid #3498db;padding-bottom:20px;margin-bottom:30px}
-      h1{color:#3498db;font-size:22px;text-transform:uppercase;margin-bottom:4px}
-      .info{color:#7f8c8d;font-size:13px;margin:2px 0}
-      table{width:100%;border-collapse:collapse;margin-top:10px}
-      th,td{border:1px solid #ecf0f1;padding:11px 13px;text-align:left;font-size:12px}
-      th{background:#f8f9fa;color:#34495e;font-weight:bold;text-transform:uppercase}
-      tr:nth-child(even){background:#fcfcfc}
-      .entrada{color:#2ecc71;font-weight:bold}
-      .saida{color:#e74c3c;font-weight:bold}
-      .total{margin-top:30px;text-align:right;background:#f8f9fa;padding:20px;border-radius:8px;border-left:5px solid #3498db}
-      .total-label{font-size:15px;color:#7f8c8d}
-      .total-value{font-size:22px;font-weight:bold;color:#2c3e50;display:block;margin-top:4px}
-      .footer{margin-top:40px;text-align:center;font-size:10px;color:#bdc3c7;border-top:1px solid #ecf0f1;padding-top:10px}
-    </style></head><body>
-      <div class="header">
-        <h1>Relatório de Caixa — Bifers</h1>
-        <p class="info"><strong>Moeda:</strong> ${moedaGlobal}</p>
-        <p class="info"><strong>Período:</strong> ${tituloPeriodo}</p>
-        <p class="info"><strong>Gerado em:</strong> ${new Date().toLocaleString('pt-BR')}</p>
-      </div>
-      <table>
-        <thead><tr><th width="20%">Data e Hora</th><th width="45%">Descrição</th><th width="15%">Tipo</th><th width="20%">Valor</th></tr></thead>
-        <tbody>
-          ${listaParaPDF.map(item => `
-            <tr>
-              <td>${new Date(item.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
-              <td>${item.descricao || '-'}</td>
-              <td class="${item.tipo === 'ENTRADA' ? 'entrada' : 'saida'}">${item.tipo}</td>
-              <td style="font-weight:bold;text-align:right">${item.tipo === 'ENTRADA' ? '+' : '-'} ${formatarMoeda(item.valor, moedaGlobal)}</td>
-            </tr>`).join('')}
-          ${listaParaPDF.length === 0 ? '<tr><td colspan="4" style="text-align:center;padding:30px;color:#95a5a6">Nenhuma movimentação neste período.</td></tr>' : ''}
-        </tbody>
-      </table>
-      <div class="total">
-        <span class="total-label">Movimentação Líquida do Período:</span>
-        <span class="total-value">${formatarMoeda(saldoDoPeriodo, moedaGlobal)}</span>
-        <span style="font-size:11px;color:#95a5a6;display:block;margin-top:4px">Saldo total geral disponível: ${formatarMoeda(saldo, moedaGlobal)}</span>
-      </div>
-      <div class="footer">Documento gerado automaticamente por Bifers.</div>
-    </body></html>`;
-
-    try {
-      const { uri } = await Print.printToFileAsync({ html, base64: false });
-      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Relatorio_Caixa_${moedaGlobal}.pdf` });
-    } catch {
-      Alert.alert('Erro', 'Não foi possível gerar ou compartilhar o PDF.');
+    } catch (e: any) {
+      Alert.alert('Erro', e.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PDF — LUCROS / COMISSÕES (usando dados reais)
-  // ─────────────────────────────────────────────────────────────────────────
-  const gerarPDFLucros = async (periodoEscolhido: PeriodoPDF) => {
-    let startDate: Date = new Date(), endDate: Date = new Date();
-    let tituloPeriodo: string = periodoEscolhido;
+  const gerarPDF = async (periodo: PeriodoPDF) => {
+    setLoading(true);
+    let dadosFiltrados = [...listaCaixa];
+    const hoje = new Date();
 
-    if (periodoEscolhido === 'CUSTOM') {
-      if (dataInicioLucros.length !== 10 || dataFimLucros.length !== 10)
-        return Alert.alert('Erro', 'Preencha as datas completamente (DD/MM/AAAA).');
-      const [d1, m1, y1] = dataInicioLucros.split('/');
-      const [d2, m2, y2] = dataFimLucros.split('/');
-      startDate = new Date(Number(y1), Number(m1) - 1, Number(d1), 0, 0, 0);
-      endDate = new Date(Number(y2), Number(m2) - 1, Number(d2), 23, 59, 59);
-      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()))
-        return Alert.alert('Erro', 'Data inválida.');
-      tituloPeriodo = `${dataInicioLucros} a ${dataFimLucros}`;
+    if (periodo === 'HOJE') {
+      dadosFiltrados = dadosFiltrados.filter(item => new Date(item.created_at).toDateString() === hoje.toDateString());
+    } else if (periodo === 'MES') {
+      dadosFiltrados = dadosFiltrados.filter(item => {
+        const d = new Date(item.created_at);
+        return d.getMonth() === hoje.getMonth() && d.getFullYear() === hoje.getFullYear();
+      });
+    } else if (periodo === 'CUSTOM') {
+      if (!dataInicio || !dataFim) {
+        setLoading(false);
+        return Alert.alert('Erro', 'Preencha as datas de início e fim.');
+      }
+      const [di, mi, yi] = dataInicio.split('/');
+      const [df, mf, yf] = dataFim.split('/');
+      const start = new Date(Number(yi), Number(mi) - 1, Number(di), 0, 0, 0);
+      const end = new Date(Number(yf), Number(mf) - 1, Number(df), 23, 59, 59);
+      dadosFiltrados = dadosFiltrados.filter(item => {
+        const d = new Date(item.created_at);
+        return d >= start && d <= end;
+      });
     }
 
-    setModalPdfLucrosVisivel(false);
-    setMostrarFormCustomLucros(false);
+    const totalEntradas = dadosFiltrados.filter(i => i.tipo === 'ENTRADA').reduce((acc, curr) => acc + Number(curr.valor), 0);
+    const totalSaidas = dadosFiltrados.filter(i => i.tipo === 'SAIDA').reduce((acc, curr) => acc + Number(curr.valor), 0);
+
+    const html = `
+    <html><head><style>
+      body { font-family: Helvetica, sans-serif; padding: 20px; color: #2c3e50; }
+      h1 { color: #3498db; text-align: center; }
+      .summary { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #dfe6e9; padding: 10px; text-align: left; }
+      th { background: #3498db; color: white; }
+      .entrada { color: #27ae60; font-weight: bold; }
+      .saida { color: #e74c3c; font-weight: bold; }
+    </style></head><body>
+      <h1>Relatório de Caixa (${moedaGlobal})</h1>
+      <div class="summary">
+        <p><strong>Período:</strong> ${periodo === 'CUSTOM' ? `${dataInicio} a ${dataFim}` : periodo}</p>
+        <p><strong>Total Entradas:</strong> ${formatarMoeda(totalEntradas, moedaGlobal)}</p>
+        <p><strong>Total Saídas:</strong> ${formatarMoeda(totalSaidas, moedaGlobal)}</p>
+        <p><strong>Saldo no Período:</strong> ${formatarMoeda(totalEntradas - totalSaidas, moedaGlobal)}</p>
+      </div>
+      <table>
+        <thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Valor</th></tr></thead>
+        <tbody>
+          ${dadosFiltrados.map(i => `
+            <tr>
+              <td>${new Date(i.created_at).toLocaleDateString('pt-BR')}</td>
+              <td class="${i.tipo.toLowerCase()}">${i.tipo}</td>
+              <td>${i.descricao}</td>
+              <td class="${i.tipo.toLowerCase()}">${formatarMoeda(i.valor, moedaGlobal)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </body></html>`;
+
+    try {
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Caixa_${moedaGlobal}.pdf` });
+      setModalPdfVisivel(false);
+    } catch {
+      Alert.alert('Erro', 'Falha ao gerar PDF');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const gerarPDFLucros = async (periodo: PeriodoPDF) => {
     setLoadingLucros(true);
-
+    let contratosFiltrados = [...listaContratos];
     const hoje = new Date();
-    const listaParaPDF = listaContratos.filter(item => {
-      if (periodoEscolhido === 'TUDO') return true;
-      const dataItem = new Date(item.created_at);
-      if (periodoEscolhido === 'HOJE') return dataItem.toDateString() === hoje.toDateString();
-      if (periodoEscolhido === 'MES') return dataItem.getMonth() === hoje.getMonth() && dataItem.getFullYear() === hoje.getFullYear();
-      if (periodoEscolhido === 'CUSTOM') return dataItem >= startDate && dataItem <= endDate;
-      return true;
-    });
 
-    const totaisPeriodo = listaParaPDF.reduce((acc, c) => {
+    if (periodo === 'HOJE') {
+      contratosFiltrados = contratosFiltrados.filter(c => new Date(c.created_at).toDateString() === hoje.toDateString());
+    } else if (periodo === 'MES') {
+      contratosFiltrados = contratosFiltrados.filter(c => {
+        const d = new Date(c.created_at);
+        return d.getMonth() === hoje.getMonth() && d.getFullYear() === hoje.getFullYear();
+      });
+    } else if (periodo === 'CUSTOM') {
+      if (!dataInicioLucros || !dataFimLucros) {
+        setLoadingLucros(false);
+        return Alert.alert('Erro', 'Preencha as datas.');
+      }
+      const [di, mi, yi] = dataInicioLucros.split('/');
+      const [df, mf, yf] = dataFimLucros.split('/');
+      const start = new Date(Number(yi), Number(mi) - 1, Number(di), 0, 0, 0);
+      const end = new Date(Number(yf), Number(mf) - 1, Number(df), 23, 59, 59);
+      contratosFiltrados = contratosFiltrados.filter(c => {
+        const d = new Date(c.created_at);
+        return d >= start && d <= end;
+      });
+    }
+
+    const totaisPeriodo = contratosFiltrados.reduce((acc, c) => {
       acc.capital += Number(c.valor_principal) || 0;
       acc.lucroPrevisto += calcularLucroPrevisto(c);
       acc.lucroRecebido += c.jurosRecebidos;
@@ -449,496 +379,248 @@ export default function CaixaScreen() {
       return acc;
     }, { capital: 0, lucroPrevisto: 0, lucroRecebido: 0, comissao: 0 });
 
-    // Resumo por comissionado no período
-    const mapaComPeriodo: Record<string, { nome: string; acordado: number; pago: number }> = {};
-    listaParaPDF.forEach(c => {
-      const detalhes = c.comissionados_detalhes || [];
-      detalhes.forEach((d: any) => {
-        const nome = d.nome || 'Parceiro';
-        const acordado = d.tipoComissao === 'PERCENTUAL'
-          ? (Number(c.valor_principal) * (Number(d.valorDigitado) / 100))
-          : Number(d.valorDigitado);
-        if (!mapaComPeriodo[nome]) mapaComPeriodo[nome] = { nome, acordado: 0, pago: 0 };
-        mapaComPeriodo[nome].acordado += acordado;
-        mapaComPeriodo[nome].pago += c.comissoesPagas / Math.max(detalhes.length, 1);
-      });
-    });
-    const comissionadosPeriodo = Object.values(mapaComPeriodo);
-
     const html = `
     <html><head><style>
-      body{font-family:Helvetica,sans-serif;padding:20px;color:#2c3e50;font-size:13px}
-      .header{text-align:center;border-bottom:3px solid #8e44ad;padding-bottom:18px;margin-bottom:28px}
-      h1{color:#8e44ad;font-size:20px;text-transform:uppercase;margin-bottom:4px}
-      h2{color:#6c3483;font-size:15px;margin:28px 0 12px}
-      .info{color:#7f8c8d;font-size:12px;margin:2px 0}
-      .cards{display:flex;gap:12px;margin-bottom:28px;flex-wrap:wrap}
-      .card{flex:1;min-width:120px;background:#f8f9fa;border-radius:8px;padding:14px;border-top:4px solid #8e44ad;text-align:center}
-      .card-label{font-size:10px;color:#7f8c8d;text-transform:uppercase;margin-bottom:6px}
-      .card-value{font-size:17px;font-weight:bold;color:#2c3e50}
-      .card-value.verde{color:#27ae60}
-      .card-value.azul{color:#2980b9}
-      .card-value.laranja{color:#e67e22}
-      .card-value.roxo{color:#8e44ad}
-      table{width:100%;border-collapse:collapse;margin-top:10px}
-      th,td{border:1px solid #ecf0f1;padding:9px 11px;text-align:left;font-size:11px}
-      th{background:#f0eaf6;color:#6c3483;font-weight:bold;text-transform:uppercase}
-      tr:nth-child(even){background:#fcfcfc}
-      .status{display:inline-block;padding:3px 8px;border-radius:10px;font-size:10px;font-weight:bold;color:#fff}
-      .s-ativo{background:#2980b9}
-      .s-quitado{background:#27ae60}
-      .num{text-align:right;font-weight:bold}
-      .lucro{color:#27ae60}
-      .capital{color:#2980b9}
-      .comissao{color:#e67e22}
-      .summary{margin-top:24px;background:#f8f9fa;border-radius:8px;padding:18px;border-left:5px solid #8e44ad}
-      .summary-title{font-size:14px;font-weight:bold;color:#6c3483;margin-bottom:14px}
-      .summary-row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #ecf0f1;font-size:13px}
-      .summary-row:last-child{border-bottom:none;font-size:15px;font-weight:bold}
-      .com-table{margin-top:10px}
-      .footer{margin-top:36px;text-align:center;font-size:10px;color:#bdc3c7;border-top:1px solid #ecf0f1;padding-top:10px}
+      body { font-family: Helvetica, sans-serif; padding: 20px; color: #2c3e50; }
+      h1 { color: #8e44ad; text-align: center; }
+      .summary-box { background: #f3e5f5; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #d1c4e9; }
+      .summary-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+      table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      th, td { border: 1px solid #dfe6e9; padding: 8px; text-align: left; }
+      th { background: #8e44ad; color: white; }
     </style></head><body>
-      <div class="header">
-        <h1>Relatório de Lucros e Comissões — Bifers</h1>
-        <p class="info"><strong>Moeda:</strong> ${moedaGlobal} &nbsp;|&nbsp; <strong>Período:</strong> ${tituloPeriodo}</p>
-        <p class="info"><strong>Gerado em:</strong> ${new Date().toLocaleString('pt-BR')}</p>
+      <h1>Relatório de Lucros e Comissões (${moedaGlobal})</h1>
+      <div class="summary-box">
+        <div class="summary-row"><span>Capital Investido:</span> <strong>${formatarMoeda(totaisPeriodo.capital, moedaGlobal)}</strong></div>
+        <div class="summary-row"><span>Lucro Recebido:</span> <strong style="color:#27ae60">+ ${formatarMoeda(totaisPeriodo.lucroRecebido, moedaGlobal)}</strong></div>
+        <div class="summary-row"><span>Comissões Pagas:</span> <strong style="color:#e74c3c">- ${formatarMoeda(totaisPeriodo.comissao, moedaGlobal)}</strong></div>
+        <div class="summary-row"><span>Lucro Líquido:</span> <strong>${formatarMoeda(totaisPeriodo.lucroRecebido - totaisPeriodo.comissao, moedaGlobal)}</strong></div>
       </div>
-
-      <div class="cards">
-        <div class="card">
-          <div class="card-label">Capital em Risco</div>
-          <div class="card-value azul">${formatarMoeda(totaisPeriodo.capital, moedaGlobal)}</div>
-        </div>
-        <div class="card">
-          <div class="card-label">Lucro Previsto</div>
-          <div class="card-value verde">${formatarMoeda(totaisPeriodo.lucroPrevisto, moedaGlobal)}</div>
-        </div>
-        <div class="card">
-          <div class="card-label">Lucro Recebido</div>
-          <div class="card-value verde">${formatarMoeda(totaisPeriodo.lucroRecebido, moedaGlobal)}</div>
-        </div>
-        <div class="card">
-          <div class="card-label">Lucro a Receber</div>
-          <div class="card-value laranja">${formatarMoeda(totaisPeriodo.lucroPrevisto - totaisPeriodo.lucroRecebido, moedaGlobal)}</div>
-        </div>
-        <div class="card">
-          <div class="card-label">Comissões Pagas</div>
-          <div class="card-value roxo">${formatarMoeda(totaisPeriodo.comissao, moedaGlobal)}</div>
-        </div>
-        <div class="card">
-          <div class="card-label">Contratos</div>
-          <div class="card-value">${listaParaPDF.length}</div>
-        </div>
-      </div>
-
-      <h2>Detalhamento por Contrato</h2>
       <table>
-        <thead>
-          <tr>
-            <th>Cliente</th>
-            <th>Data</th>
-            <th>Capital</th>
-            <th>Frequência</th>
-            <th>Lucro Previsto</th>
-            <th>Juros Recebidos</th>
-            <th>Comissão Paga</th>
-            <th>Status</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Cliente</th><th>Status</th><th>Capital</th><th>Juros Rec.</th><th>Comissão</th></tr></thead>
         <tbody>
-          ${listaParaPDF.map(c => {
-            const lucroP = calcularLucroPrevisto(c);
-            return `
+          ${contratosFiltrados.map(c => `
             <tr>
-              <td><strong>${c.nomeCliente}</strong></td>
-              <td>${new Date(c.created_at).toLocaleDateString('pt-BR')}</td>
-              <td class="num capital">${formatarMoeda(c.valor_principal, moedaGlobal)}</td>
-              <td>${c.frequencia || '-'} (${c.quantidade_parcelas || 0}x)</td>
-              <td class="num lucro">+ ${formatarMoeda(lucroP, moedaGlobal)}</td>
-              <td class="num lucro">+ ${formatarMoeda(c.jurosRecebidos, moedaGlobal)}</td>
-              <td class="num comissao">${formatarMoeda(c.comissoesPagas, moedaGlobal)}</td>
-              <td><span class="status s-${(c.status || '').toLowerCase()}">${c.status || '-'}</span></td>
-            </tr>`;
-          }).join('')}
-          ${listaParaPDF.length === 0 ? '<tr><td colspan="8" style="text-align:center;padding:28px;color:#95a5a6">Nenhum contrato neste período.</td></tr>' : ''}
+              <td>${c.nomeCliente}</td>
+              <td>${c.status}</td>
+              <td>${formatarMoeda(c.valor_principal, moedaGlobal)}</td>
+              <td>${formatarMoeda(c.jurosRecebidos, moedaGlobal)}</td>
+              <td>${formatarMoeda(c.comissoesPagas, moedaGlobal)}</td>
+            </tr>
+          `).join('')}
         </tbody>
       </table>
-
-      ${comissionadosPeriodo.length > 0 ? `
-      <h2>Comissões por Parceiro</h2>
-      <table class="com-table">
-        <thead>
-          <tr>
-            <th>Parceiro</th>
-            <th>Comissão Total Acordada</th>
-            <th>Comissão Já Paga</th>
-            <th>Comissão a Pagar</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${comissionadosPeriodo.map(com => `
-          <tr>
-            <td><strong>${com.nome}</strong></td>
-            <td class="num comissao">${formatarMoeda(com.acordado, moedaGlobal)}</td>
-            <td class="num" style="color:#27ae60">${formatarMoeda(com.pago, moedaGlobal)}</td>
-            <td class="num" style="color:#e67e22">${formatarMoeda(Math.max(com.acordado - com.pago, 0), moedaGlobal)}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>` : ''}
-
-      <div class="summary">
-        <div class="summary-title">Resumo Financeiro do Período</div>
-        <div class="summary-row">
-          <span>Capital Total Emprestado</span>
-          <span style="color:#2980b9;font-weight:bold">${formatarMoeda(totaisPeriodo.capital, moedaGlobal)}</span>
-        </div>
-        <div class="summary-row">
-          <span>Lucro Previsto (juros totais)</span>
-          <span style="color:#27ae60;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroPrevisto, moedaGlobal)}</span>
-        </div>
-        <div class="summary-row">
-          <span>Lucro Já Recebido (juros pagos)</span>
-          <span style="color:#27ae60;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroRecebido, moedaGlobal)}</span>
-        </div>
-        <div class="summary-row">
-          <span>Lucro a Receber</span>
-          <span style="color:#e67e22;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroPrevisto - totaisPeriodo.lucroRecebido, moedaGlobal)}</span>
-        </div>
-        <div class="summary-row">
-          <span>Total de Comissões Pagas</span>
-          <span style="color:#8e44ad;font-weight:bold">- ${formatarMoeda(totaisPeriodo.comissao, moedaGlobal)}</span>
-        </div>
-        <div class="summary-row">
-          <span>Lucro Líquido (recebido - comissões)</span>
-          <span style="color:#2c3e50">${formatarMoeda(totaisPeriodo.lucroRecebido - totaisPeriodo.comissao, moedaGlobal)}</span>
-        </div>
-      </div>
-
-      <div class="footer">Documento gerado automaticamente por Bifers — Administração Financeira.</div>
     </body></html>`;
 
     try {
       const { uri } = await Print.printToFileAsync({ html, base64: false });
-      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Relatorio_Lucros_${moedaGlobal}.pdf` });
+      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Lucros_${moedaGlobal}.pdf` });
+      setModalPdfLucrosVisivel(false);
     } catch {
-      Alert.alert('Erro', 'Não foi possível gerar ou compartilhar o PDF.');
+      Alert.alert('Erro', 'Falha ao gerar PDF');
     } finally {
       setLoadingLucros(false);
     }
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER — MODAL LUCROS
-  // ─────────────────────────────────────────────────────────────────────────
-  const totais = totaisLucros();
-
-  const renderModalLucros = () => (
-    <Modal visible={modalLucrosVisivel} animationType="slide" transparent={false}>
-      <SafeAreaView style={styles.modalLucrosContainer}>
-
-        <View style={styles.modalLucrosHeader}>
-          <TouchableOpacity onPress={() => setModalLucrosVisivel(false)} style={styles.btnVoltar}>
-            <Ionicons name="arrow-back" size={22} color="#fff" />
-          </TouchableOpacity>
-          <Text style={styles.modalLucrosTitulo}>Lucros & Comissões</Text>
-          <TouchableOpacity
-            onPress={() => { setMostrarFormCustomLucros(false); setModalPdfLucrosVisivel(true); }}
-            style={styles.btnPdfHeader}
-          >
-            <Ionicons name="document-text" size={18} color="#fff" />
-            <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold', marginLeft: 4 }}>PDF</Text>
-          </TouchableOpacity>
-        </View>
-
-        <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 30 }}>
-          {loadingLucros ? (
-            <ActivityIndicator color="#8e44ad" size="large" style={{ marginTop: 40 }} />
-          ) : (
-            <>
-              {/* Card principal de lucro */}
-              <View style={styles.cardLucroPrincipal}>
-                <Text style={styles.cardLucroLabel}>Lucro Total Previsto</Text>
-                <Text style={styles.cardLucroValor}>{formatarMoeda(totais.lucroTotal, moedaGlobal)}</Text>
-                <View style={styles.cardLucroRow}>
-                  <View style={styles.cardLucroMini}>
-                    <Text style={styles.cardLucroMiniLabel}>Já Recebido</Text>
-                    <Text style={[styles.cardLucroMiniValor, { color: '#2ecc71' }]}>
-                      {formatarMoeda(totais.lucroRecebido, moedaGlobal)}
-                    </Text>
-                  </View>
-                  <View style={[styles.cardLucroMini, { borderLeftWidth: 1, borderLeftColor: 'rgba(255,255,255,0.3)' }]}>
-                    <Text style={styles.cardLucroMiniLabel}>A Receber</Text>
-                    <Text style={[styles.cardLucroMiniValor, { color: '#f39c12' }]}>
-                      {formatarMoeda(totais.lucroTotal - totais.lucroRecebido, moedaGlobal)}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-
-              {/* Grid de indicadores */}
-              <View style={styles.gridIndicadores}>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="cash-outline" size={22} color="#2980b9" />
-                  <Text style={styles.indicadorValor}>{formatarMoeda(totais.capitalTotal, moedaGlobal)}</Text>
-                  <Text style={styles.indicadorLabel}>Capital Total</Text>
-                </View>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="trending-up-outline" size={22} color="#8e44ad" />
-                  <Text style={styles.indicadorValor}>
-                    {totais.capitalTotal > 0 ? ((totais.lucroTotal / totais.capitalTotal) * 100).toFixed(1) + '%' : '0%'}
-                  </Text>
-                  <Text style={styles.indicadorLabel}>Rentabilidade</Text>
-                </View>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="people-outline" size={22} color="#e67e22" />
-                  <Text style={[styles.indicadorValor, { color: '#e67e22' }]}>{formatarMoeda(totais.comissaoTotal, moedaGlobal)}</Text>
-                  <Text style={styles.indicadorLabel}>Comissões Pagas</Text>
-                </View>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="checkmark-circle-outline" size={22} color="#2ecc71" />
-                  <Text style={[styles.indicadorValor, { color: '#2ecc71' }]}>{totais.qtdQuitados}</Text>
-                  <Text style={styles.indicadorLabel}>Quitados</Text>
-                </View>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="time-outline" size={22} color="#3498db" />
-                  <Text style={[styles.indicadorValor, { color: '#3498db' }]}>{totais.qtdAtivos}</Text>
-                  <Text style={styles.indicadorLabel}>Ativos</Text>
-                </View>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="calculator-outline" size={22} color="#7f8c8d" />
-                  <Text style={styles.indicadorValor}>{formatarMoeda(totais.lucroRecebido - totais.comissaoTotal, moedaGlobal)}</Text>
-                  <Text style={styles.indicadorLabel}>Lucro Líquido</Text>
-                </View>
-              </View>
-
-              {/* Resumo por comissionado */}
-              {resumoComissionados.length > 0 && (
-                <View style={styles.comissionadosCard}>
-                  <View style={styles.comissionadosHeader}>
-                    <Ionicons name="people" size={18} color="#8e44ad" />
-                    <Text style={styles.comissionadosTitle}>Comissões por Parceiro</Text>
-                  </View>
-                  {resumoComissionados.map((com, idx) => (
-                    <View key={idx} style={styles.comissionadoRow}>
-                      <View style={styles.comissionadoAvatar}>
-                        <Text style={styles.comissionadoAvatarText}>{com.nome[0].toUpperCase()}</Text>
-                      </View>
-                      <View style={{ flex: 1, marginLeft: 10 }}>
-                        <Text style={styles.comissionadoNome}>{com.nome}</Text>
-                        <Text style={styles.comissionadoPago}>Pago: {formatarMoeda(com.totalPago, moedaGlobal)}</Text>
-                      </View>
-                      <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.comissionadoAcordado}>{formatarMoeda(com.totalAcordado, moedaGlobal)}</Text>
-                        <Text style={styles.comissionadoLabel}>acordado</Text>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-
-              {/* Filtro de status */}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filtroLucrosBar}>
-                {(['TODOS', 'ATIVO', 'QUITADO'] as const).map(f => (
-                  <TouchableOpacity
-                    key={f}
-                    onPress={() => setFiltroLucros(f)}
-                    style={[styles.filtroChip, filtroLucros === f && { backgroundColor: f === 'TODOS' ? '#2c3e50' : corStatus(f) }]}
-                  >
-                    <Text style={[styles.filtroChipText, filtroLucros === f && { color: '#fff' }]}>{f}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-
-              {/* Lista de contratos */}
-              {listaFiltrada.length === 0 ? (
-                <Text style={{ textAlign: 'center', color: '#95a5a6', marginTop: 30 }}>Nenhum contrato encontrado.</Text>
-              ) : (
-                listaFiltrada.map(c => {
-                  const lucroP = calcularLucroPrevisto(c);
-                  const lucroAR = calcularLucroAReceber(c);
-                  const progressoPct = lucroP > 0 ? Math.min(c.jurosRecebidos / lucroP, 1) : 0;
-
-                  return (
-                    <View key={c.id} style={styles.empCard}>
-                      <View style={styles.empCabecalho}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.empNome}>{c.nomeCliente}</Text>
-                          {c.telefoneCliente ? (
-                            <Text style={{ fontSize: 11, color: '#7f8c8d' }}>
-                              <Ionicons name="logo-whatsapp" size={11} color="#25D366" /> {c.telefoneCliente}
-                            </Text>
-                          ) : null}
-                        </View>
-                        <View style={[styles.badgeStatus, { backgroundColor: corStatus(c.status) }]}>
-                          <Text style={styles.badgeStatusText}>{c.status}</Text>
-                        </View>
-                      </View>
-
-                      <Text style={styles.empData}>
-                        Emitido em {new Date(c.created_at).toLocaleDateString('pt-BR')}
-                        {c.frequencia ? `  •  ${c.frequencia}` : ''}
-                        {c.quantidade_parcelas ? `  •  ${c.quantidade_parcelas} parcelas` : ''}
-                      </Text>
-
-                      <View style={styles.empGrid}>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Capital</Text>
-                          <Text style={[styles.empGridValor, { color: '#2980b9' }]}>
-                            {formatarMoeda(c.valor_principal, moedaGlobal)}
-                          </Text>
-                        </View>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Lucro Previsto</Text>
-                          <Text style={[styles.empGridValor, { color: '#27ae60' }]}>
-                            + {formatarMoeda(lucroP, moedaGlobal)}
-                          </Text>
-                        </View>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Juros Recebidos</Text>
-                          <Text style={[styles.empGridValor, { color: '#27ae60' }]}>
-                            + {formatarMoeda(c.jurosRecebidos, moedaGlobal)}
-                          </Text>
-                        </View>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Lucro a Receber</Text>
-                          <Text style={[styles.empGridValor, { color: '#e67e22' }]}>
-                            + {formatarMoeda(lucroAR, moedaGlobal)}
-                          </Text>
-                        </View>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Comissão Paga</Text>
-                          <Text style={[styles.empGridValor, { color: '#8e44ad' }]}>
-                            {formatarMoeda(c.comissoesPagas, moedaGlobal)}
-                          </Text>
-                        </View>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Saldo Devedor</Text>
-                          <Text style={[styles.empGridValor, { color: '#e74c3c' }]}>
-                            {formatarMoeda(c.saldo_devedor, moedaGlobal)}
-                          </Text>
-                        </View>
-                      </View>
-
-                      <View style={styles.progressoContainer}>
-                        <View style={styles.progressoInfo}>
-                          <Text style={styles.progressoText}>Progresso do lucro</Text>
-                          <Text style={styles.progressoText}>{(progressoPct * 100).toFixed(0)}% recebido</Text>
-                        </View>
-                        <View style={styles.progressoBar}>
-                          <View style={[styles.progressoFill, { width: `${progressoPct * 100}%` as any, backgroundColor: corStatus(c.status) }]} />
-                        </View>
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </>
-          )}
-        </ScrollView>
-
-        {/* Modal PDF de Lucros */}
-        <Modal visible={modalPdfLucrosVisivel} animationType="fade" transparent>
-          <View style={styles.overlay}>
-            <View style={styles.modalPdf}>
-              {!mostrarFormCustomLucros ? (
-                <>
-                  <Text style={styles.modalPdfTitle}>Exportar Relatório</Text>
-                  <Text style={styles.modalPdfSub}>Escolha o período para o relatório de lucros</Text>
-                  <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDFLucros('HOJE')}>
-                    <Ionicons name="today-outline" size={20} color="#8e44ad" />
-                    <Text style={styles.btnPdfOptionText}>Apenas Hoje</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDFLucros('MES')}>
-                    <Ionicons name="calendar-outline" size={20} color="#8e44ad" />
-                    <Text style={styles.btnPdfOptionText}>Este Mês</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.btnPdfOption} onPress={() => setMostrarFormCustomLucros(true)}>
-                    <Ionicons name="calendar" size={20} color="#8e44ad" />
-                    <Text style={styles.btnPdfOptionText}>Período Específico</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDFLucros('TUDO')}>
-                    <Ionicons name="layers-outline" size={20} color="#8e44ad" />
-                    <Text style={styles.btnPdfOptionText}>Todo o Histórico</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.btnPdfCancel} onPress={() => setModalPdfLucrosVisivel(false)}>
-                    <Text style={styles.btnPdfCancelText}>Cancelar</Text>
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.modalPdfTitle}>Período Específico</Text>
-                  <Text style={styles.modalPdfSub}>Data de início e fim</Text>
-                  <TextInput style={styles.inputData} placeholder="Data Início (DD/MM/AAAA)" keyboardType="numeric" value={dataInicioLucros} onChangeText={(t) => formatarData(t, setDataInicioLucros)} />
-                  <TextInput style={styles.inputData} placeholder="Data Fim (DD/MM/AAAA)" keyboardType="numeric" value={dataFimLucros} onChangeText={(t) => formatarData(t, setDataFimLucros)} />
-                  <TouchableOpacity style={[styles.btnPdfOption, { backgroundColor: '#8e44ad', justifyContent: 'center' }]} onPress={() => gerarPDFLucros('CUSTOM')}>
-                    <Text style={[styles.btnPdfOptionText, { color: '#fff', marginLeft: 0 }]}>GERAR RELATÓRIO</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.btnPdfCancel} onPress={() => setMostrarFormCustomLucros(false)}>
-                    <Text style={styles.btnPdfCancelText}>Voltar</Text>
-                  </TouchableOpacity>
-                </>
-              )}
-            </View>
+  const renderModalLucros = () => {
+    const totais = totaisLucros();
+    return (
+      <Modal visible={modalLucrosVisivel} animationType="slide" transparent={false}>
+        <SafeAreaView style={styles.modalLucrosContainer}>
+          <View style={styles.modalLucrosHeader}>
+            <TouchableOpacity onPress={() => setModalLucrosVisivel(false)} style={styles.btnVoltar}>
+              <Ionicons name="arrow-back" size={22} color="#fff" />
+            </TouchableOpacity>
+            <Text style={styles.modalLucrosTitulo}>Lucros & Comissões</Text>
+            <TouchableOpacity
+              onPress={() => { setMostrarFormCustomLucros(false); setModalPdfLucrosVisivel(true); }}
+              style={styles.btnPdfHeader}
+            >
+              <Ionicons name="document-text" size={18} color="#fff" />
+              <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold', marginLeft: 4 }}>PDF</Text>
+            </TouchableOpacity>
           </View>
-        </Modal>
 
-      </SafeAreaView>
-    </Modal>
-  );
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER PRINCIPAL
-  // ─────────────────────────────────────────────────────────────────────────
-  return (
-    <SafeAreaView style={styles.container}>
-
-      {/* Modal PDF Caixa */}
-      <Modal visible={modalPdfVisivel} animationType="fade" transparent>
-        <View style={styles.overlay}>
-          <View style={styles.modalPdf}>
-            {!mostrarFormCustom ? (
-              <>
-                <Text style={styles.modalPdfTitle}>Exportar PDF</Text>
-                <Text style={styles.modalPdfSub}>Qual período você deseja no relatório?</Text>
-                <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDF('HOJE')}>
-                  <Ionicons name="today-outline" size={20} color="#3498db" />
-                  <Text style={styles.btnPdfOptionText}>Apenas Hoje</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDF('MES')}>
-                  <Ionicons name="calendar-outline" size={20} color="#3498db" />
-                  <Text style={styles.btnPdfOptionText}>Este Mês</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnPdfOption} onPress={() => setMostrarFormCustom(true)}>
-                  <Ionicons name="calendar" size={20} color="#3498db" />
-                  <Text style={styles.btnPdfOptionText}>Período Específico</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDF('TUDO')}>
-                  <Ionicons name="layers-outline" size={20} color="#3498db" />
-                  <Text style={styles.btnPdfOptionText}>Todo o Histórico</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnPdfCancel} onPress={() => setModalPdfVisivel(false)}>
-                  <Text style={styles.btnPdfCancelText}>Cancelar</Text>
-                </TouchableOpacity>
-              </>
+          <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 30 }}>
+            {loadingLucros ? (
+              <ActivityIndicator color="#8e44ad" size="large" style={{ marginTop: 40 }} />
             ) : (
               <>
-                <Text style={styles.modalPdfTitle}>Período Específico</Text>
-                <Text style={styles.modalPdfSub}>Digite a data de início e fim</Text>
-                <TextInput style={styles.inputData} placeholder="Data Início (Ex: 01/01/2026)" keyboardType="numeric" value={dataInicio} onChangeText={(t) => formatarData(t, setDataInicio)} />
-                <TextInput style={styles.inputData} placeholder="Data Fim (Ex: 31/01/2026)" keyboardType="numeric" value={dataFim} onChangeText={(t) => formatarData(t, setDataFim)} />
-                <TouchableOpacity style={[styles.btnPdfOption, { backgroundColor: '#3498db', justifyContent: 'center' }]} onPress={() => gerarPDF('CUSTOM')}>
-                  <Text style={[styles.btnPdfOptionText, { color: '#fff', marginLeft: 0 }]}>GERAR RELATÓRIO</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnPdfCancel} onPress={() => setMostrarFormCustom(false)}>
-                  <Text style={styles.btnPdfCancelText}>Voltar</Text>
-                </TouchableOpacity>
+                <View style={styles.cardLucroPrincipal}>
+                  <Text style={styles.cardLucroLabel}>Lucro Total Previsto</Text>
+                  <Text style={styles.cardLucroValor}>{formatarMoeda(totais.lucroTotal, moedaGlobal)}</Text>
+                  <View style={styles.cardLucroRow}>
+                    <View style={styles.cardLucroMini}>
+                      <Text style={styles.cardLucroMiniLabel}>Já Recebido</Text>
+                      <Text style={[styles.cardLucroMiniValor, { color: '#2ecc71' }]}>
+                        {formatarMoeda(totais.lucroRecebido, moedaGlobal)}
+                      </Text>
+                    </View>
+                    <View style={[styles.cardLucroMini, { borderLeftWidth: 1, borderLeftColor: 'rgba(255,255,255,0.3)' }]}>
+                      <Text style={styles.cardLucroMiniLabel}>A Receber</Text>
+                      <Text style={[styles.cardLucroMiniValor, { color: '#f39c12' }]}>
+                        {formatarMoeda(totais.lucroTotal - totais.lucroRecebido, moedaGlobal)}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                <View style={styles.gridIndicadores}>
+                  <View style={styles.indicadorCard}>
+                    <Ionicons name="cash-outline" size={22} color="#2980b9" />
+                    <Text style={styles.indicadorValor}>{formatarMoeda(totais.capitalTotal, moedaGlobal)}</Text>
+                    <Text style={styles.indicadorLabel}>Capital Total</Text>
+                  </View>
+                  <View style={styles.indicadorCard}>
+                    <Ionicons name="trending-up-outline" size={22} color="#8e44ad" />
+                    <Text style={styles.indicadorValor}>
+                      {totais.capitalTotal > 0 ? ((totais.lucroTotal / totais.capitalTotal) * 100).toFixed(1) + '%' : '0%'}
+                    </Text>
+                    <Text style={styles.indicadorLabel}>Rentabilidade</Text>
+                  </View>
+                  <View style={styles.indicadorCard}>
+                    <Ionicons name="people-outline" size={22} color="#e67e22" />
+                    <Text style={[styles.indicadorValor, { color: '#e67e22' }]}>{formatarMoeda(totais.comissaoTotal, moedaGlobal)}</Text>
+                    <Text style={styles.indicadorLabel}>Comissões Pagas</Text>
+                  </View>
+                  <View style={styles.indicadorCard}>
+                    <Ionicons name="checkmark-circle-outline" size={22} color="#2ecc71" />
+                    <Text style={[styles.indicadorValor, { color: '#2ecc71' }]}>{totais.qtdQuitados}</Text>
+                    <Text style={styles.indicadorLabel}>Quitados</Text>
+                  </View>
+                  <View style={styles.indicadorCard}>
+                    <Ionicons name="time-outline" size={22} color="#3498db" />
+                    <Text style={[styles.indicadorValor, { color: '#3498db' }]}>{totais.qtdAtivos}</Text>
+                    <Text style={styles.indicadorLabel}>Ativos</Text>
+                  </View>
+                  <View style={styles.indicadorCard}>
+                    <Ionicons name="calculator-outline" size={22} color="#7f8c8d" />
+                    <Text style={styles.indicadorValor}>{formatarMoeda(totais.lucroRecebido - totais.comissaoTotal, moedaGlobal)}</Text>
+                    <Text style={styles.indicadorLabel}>Lucro Líquido</Text>
+                  </View>
+                </View>
+
+                {resumoComissionados.length > 0 && (
+                  <View style={styles.comissionadosCard}>
+                    <View style={styles.comissionadosHeader}>
+                      <Ionicons name="people" size={18} color="#8e44ad" />
+                      <Text style={styles.comissionadosTitle}>Comissões por Parceiro</Text>
+                    </View>
+                    {resumoComissionados.map((com, idx) => (
+                      <View key={idx} style={styles.comissionadoRow}>
+                        <View style={styles.comissionadoAvatar}>
+                          <Text style={styles.comissionadoAvatarText}>{com.nome[0].toUpperCase()}</Text>
+                        </View>
+                        <View style={{ flex: 1, marginLeft: 10 }}>
+                          <Text style={styles.comissionadoNome}>{com.nome}</Text>
+                          <Text style={styles.comissionadoPago}>Pago: {formatarMoeda(com.totalPago, moedaGlobal)}</Text>
+                        </View>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={styles.comissionadoAcordado}>{formatarMoeda(com.totalAcordado, moedaGlobal)}</Text>
+                          <Text style={styles.comissionadoLabel}>acordado</Text>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filtroLucrosBar}>
+                  {(['TODOS', 'ATIVO', 'QUITADO'] as const).map(f => (
+                    <TouchableOpacity
+                      key={f}
+                      onPress={() => setFiltroLucros(f)}
+                      style={[styles.filtroChip, filtroLucros === f && { backgroundColor: f === 'TODOS' ? '#2c3e50' : corStatus(f) }]}
+                    >
+                      <Text style={[styles.filtroChipText, filtroLucros === f && { color: '#fff' }]}>{f}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                {listaFiltrada.length === 0 ? (
+                  <Text style={{ textAlign: 'center', color: '#95a5a6', marginTop: 30 }}>Nenhum contrato encontrado.</Text>
+                ) : (
+                  listaFiltrada.map(c => {
+                    const lucroP = calcularLucroPrevisto(c);
+                    const lucroAR = calcularLucroAReceber(c);
+                    const progressoPct = lucroP > 0 ? Math.min(c.jurosRecebidos / lucroP, 1) : 0;
+                    return (
+                      <View key={c.id} style={styles.empCard}>
+                        <View style={styles.empCabecalho}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.empNome}>{c.nomeCliente}</Text>
+                            {c.telefoneCliente ? (
+                              <Text style={{ fontSize: 11, color: '#7f8c8d' }}>
+                                <Ionicons name="logo-whatsapp" size={11} color="#25D366" /> {c.telefoneCliente}
+                              </Text>
+                            ) : null}
+                          </View>
+                          <View style={[styles.badgeStatus, { backgroundColor: corStatus(c.status) }]}>
+                            <Text style={styles.badgeStatusText}>{c.status}</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.empData}>
+                          Emitido em {new Date(c.created_at).toLocaleDateString('pt-BR')}
+                        </Text>
+                        <View style={styles.empGrid}>
+                          <View style={styles.empGridItem}>
+                            <Text style={styles.empGridLabel}>Capital</Text>
+                            <Text style={[styles.empGridValor, { color: '#2980b9' }]}>{formatarMoeda(c.valor_principal, moedaGlobal)}</Text>
+                          </View>
+                          <View style={styles.empGridItem}>
+                            <Text style={styles.empGridLabel}>Juros Rec.</Text>
+                            <Text style={[styles.empGridValor, { color: '#27ae60' }]}>+ {formatarMoeda(c.jurosRecebidos, moedaGlobal)}</Text>
+                          </View>
+                          <View style={styles.empGridItem}>
+                            <Text style={styles.empGridLabel}>Comissão</Text>
+                            <Text style={[styles.empGridValor, { color: '#8e44ad' }]}>{formatarMoeda(c.comissoesPagas, moedaGlobal)}</Text>
+                          </View>
+                        </View>
+                      </View>
+                    );
+                  })
+                )}
               </>
             )}
-          </View>
-        </View>
-      </Modal>
+          </ScrollView>
 
-      {/* Modal de Lucros */}
+          <Modal visible={modalPdfLucrosVisivel} animationType="fade" transparent>
+            <View style={styles.overlay}>
+              <View style={styles.modalPdf}>
+                {!mostrarFormCustomLucros ? (
+                  <>
+                    <Text style={styles.modalPdfTitle}>Exportar Relatório</Text>
+                    <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDFLucros('HOJE')}><Text style={styles.btnPdfOptionText}>Hoje</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDFLucros('MES')}><Text style={styles.btnPdfOptionText}>Mês</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.btnPdfOption} onPress={() => gerarPDFLucros('TUDO')}><Text style={styles.btnPdfOptionText}>Tudo</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.btnPdfCancel} onPress={() => setModalPdfLucrosVisivel(false)}><Text style={styles.btnPdfCancelText}>Fechar</Text></TouchableOpacity>
+                  </>
+                ) : null}
+              </View>
+            </View>
+          </Modal>
+        </SafeAreaView>
+      </Modal>
+    );
+  };
+
+  if (!temPermissao(['DIRETOR', 'LANÇADOR'])) {
+    return (
+      <SafeAreaView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <Ionicons name="lock-closed" size={80} color="#bdc3c7" />
+        <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#7f8c8d', marginTop: 20 }}>Acesso Restrito</Text>
+        <Text style={{ fontSize: 14, color: '#bdc3c7', marginTop: 10, textAlign: 'center', paddingHorizontal: 40 }}>
+          Seu perfil de Cadastrador não tem permissão para acessar o Caixa.
+        </Text>
+      </SafeAreaView>
+    );
+  }
+
+  const listaCaixaFiltrada = listaCaixa; // Simplificado
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <ModalReciboProlabore visivel={modalReciboVisivel} onClose={() => setModalReciboVisivel(false)} usuarioAtual={usuarioAtual} />
       {renderModalLucros()}
 
       <FlatList
@@ -947,249 +629,117 @@ export default function CaixaScreen() {
         showsVerticalScrollIndicator={false}
         ListHeaderComponent={
           <>
-            <Text style={styles.title}>Meu Caixa ({moedaGlobal})</Text>
-            <Text style={styles.subtitle}>Gerencie o dinheiro disponível para empréstimos</Text>
-
-            {/* Saldo */}
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Saldo Disponível</Text>
-              {loading ? <ActivityIndicator color="#fff" /> : (
-                <Text style={styles.saldoText}>
-                  {moedaGlobal === 'BRL' ? 'R$' : '$'} {saldo.toFixed(2)}
-                </Text>
-              )}
+            <View style={styles.headerSimples}>
+              <View>
+                <Text style={styles.labelSaldo}>Saldo Disponível ({moedaGlobal})</Text>
+                <Text style={[styles.saldoText, { color: saldo >= 0 ? '#2ecc71' : '#e74c3c' }]}>{formatarMoeda(saldo, moedaGlobal)}</Text>
+              </View>
+              <TouchableOpacity onPress={() => setModalPdfVisivel(true)}><Ionicons name="print" size={28} color="#3498db" /></TouchableOpacity>
             </View>
 
-            {/* Botão Lucros & Comissões */}
-            <TouchableOpacity
-              style={styles.btnLucros}
-              onPress={() => {
-                setModalLucrosVisivel(true);
-                carregarLucros();
-              }}
-            >
-              <View style={styles.btnLucrosLeft}>
-                <Ionicons name="trending-up" size={28} color="#fff" />
-                <View style={{ marginLeft: 14 }}>
-                  <Text style={styles.btnLucrosTitulo}>Lucros & Comissões</Text>
-                  <Text style={styles.btnLucrosSubtitulo}>Ver relatório detalhado por contrato</Text>
-                </View>
+            {temPermissao(['DIRETOR']) && (
+              <View style={styles.diretorAcoes}>
+                <TouchableOpacity style={styles.btnAcaoDir} onPress={() => { setModalLucrosVisivel(true); carregarLucros(); }}>
+                  <Ionicons name="trending-up" size={20} color="#fff" />
+                  <Text style={styles.btnAcaoDirText}>Lucros</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.btnAcaoDir, { backgroundColor: '#8e44ad' }]} onPress={() => setModalReciboVisivel(true)}>
+                  <Ionicons name="receipt" size={20} color="#fff" />
+                  <Text style={styles.btnAcaoDirText}>Recibos</Text>
+                </TouchableOpacity>
               </View>
-              <Ionicons name="chevron-forward" size={22} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
+            )}
 
-            {/* Formulário de lançamento */}
             <View style={styles.form}>
-              <Text style={styles.label}>Novo Lançamento Manual:</Text>
+              <Text style={styles.formTitle}>Lançamento Manual</Text>
               <View style={styles.rowTipos}>
-                <TouchableOpacity style={[styles.btnTipo, tipoLancamento === 'ENTRADA' && styles.btnTipoEntrada]} onPress={() => setTipoLancamento('ENTRADA')}>
-                  <Text style={{ color: tipoLancamento === 'ENTRADA' ? '#fff' : '#2c3e50', fontWeight: 'bold' }}>+ Receita</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.btnTipo, tipoLancamento === 'SAIDA' && styles.btnTipoSaida]} onPress={() => setTipoLancamento('SAIDA')}>
-                  <Text style={{ color: tipoLancamento === 'SAIDA' ? '#fff' : '#2c3e50', fontWeight: 'bold' }}>- Despesa</Text>
-                </TouchableOpacity>
+                <TouchableOpacity style={[styles.tipoBtn, tipoLancamento === 'ENTRADA' && styles.tipoBtnAtivo]} onPress={() => setTipoLancamento('ENTRADA')}><Text>Entrada</Text></TouchableOpacity>
+                <TouchableOpacity style={[styles.tipoBtn, tipoLancamento === 'SAIDA' && styles.tipoBtnAtivo]} onPress={() => setTipoLancamento('SAIDA')}><Text>Saída</Text></TouchableOpacity>
               </View>
-
-              <View style={{ marginBottom: 10 }}>
-                <Text style={styles.labelMini}>Data do Lançamento:</Text>
-                <TextInput style={styles.inputDescricao} placeholder="DD/MM/AAAA" keyboardType="numeric" value={dataLancamento} onChangeText={(t) => formatarData(t, setDataLancamento)} />
-              </View>
-              <View style={{ marginBottom: 10 }}>
-                <Text style={styles.labelMini}>Descrição:</Text>
-                <TextInput style={styles.inputDescricao} placeholder="Ex: Aporte, Gasolina..." value={descricao} onChangeText={setDescricao} />
-              </View>
-              <View style={{ marginBottom: 15 }}>
-                <Text style={styles.labelMini}>Valor:</Text>
-                <TextInput style={styles.input} placeholder="Ex: 5000" keyboardType="numeric" value={valor} onChangeText={setValor} />
-              </View>
-
-              <TouchableOpacity style={[styles.btnAdicionar, { backgroundColor: tipoLancamento === 'ENTRADA' ? '#3498db' : '#e74c3c' }]} onPress={handleLancarCaixa}>
-                <Ionicons name={tipoLancamento === 'ENTRADA' ? 'add-circle' : 'remove-circle'} size={20} color="#fff" style={{ marginRight: 8 }} />
-                <Text style={styles.btnText}>LANÇAR NO CAIXA</Text>
-              </TouchableOpacity>
+              <TextInput style={styles.input} placeholder="Valor" keyboardType="numeric" value={valor} onChangeText={setValor} />
+              <TextInput style={styles.input} placeholder="Descrição" value={descricao} onChangeText={setDescricao} />
+              <TouchableOpacity style={styles.btnLancar} onPress={handleLancarCaixa}><Text style={{ color: '#fff', fontWeight: 'bold' }}>Lançar</Text></TouchableOpacity>
             </View>
 
-            {/* Barra de filtros */}
-            <View style={styles.filterBar}>
-              <Text style={{ fontWeight: 'bold', color: '#2c3e50', marginRight: 10 }}>Filtro:</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }}>
-                <TouchableOpacity onPress={() => setFiltroPeriodo('HOJE')} style={[styles.filterChip, filtroPeriodo === 'HOJE' && styles.filterChipAtivo]}>
-                  <Text style={[styles.filterText, filtroPeriodo === 'HOJE' && styles.filterTextAtivo]}>Hoje</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setFiltroPeriodo('MES')} style={[styles.filterChip, filtroPeriodo === 'MES' && styles.filterChipAtivo]}>
-                  <Text style={[styles.filterText, filtroPeriodo === 'MES' && styles.filterTextAtivo]}>Este Mês</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setFiltroPeriodo('TUDO')} style={[styles.filterChip, filtroPeriodo === 'TUDO' && styles.filterChipAtivo]}>
-                  <Text style={[styles.filterText, filtroPeriodo === 'TUDO' && styles.filterTextAtivo]}>Tudo</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => { setMostrarFormCustom(false); setModalPdfVisivel(true); }}
-                  style={[styles.filterChip, { backgroundColor: '#34495e', flexDirection: 'row', alignItems: 'center' }]}
-                >
-                  <Ionicons name="document-text" size={14} color="#fff" style={{ marginRight: 4 }} />
-                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>PDF</Text>
-                </TouchableOpacity>
-              </ScrollView>
-            </View>
+            <Text style={styles.listaTitle}>Últimas Movimentações</Text>
           </>
         }
-        renderItem={({ item }) => {
-          const valorFormatado = Number(item.valor) || 0;
-          return (
-            <View style={styles.historyItem}>
-              <Ionicons name={item.tipo === 'ENTRADA' ? 'arrow-up-circle' : 'arrow-down-circle'} size={36} color={item.tipo === 'ENTRADA' ? '#2ecc71' : '#e74c3c'} />
-              <View style={styles.historyInfo}>
-                <Text style={styles.historyDesc}>{item.descricao}</Text>
-                <Text style={styles.historyDate}>
-                  {new Date(item.created_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                </Text>
-              </View>
-              <View style={styles.historyRight}>
-                <Text style={[styles.historyValor, { color: item.tipo === 'ENTRADA' ? '#2ecc71' : '#e74c3c' }]}>
-                  {item.tipo === 'ENTRADA' ? '+' : '-'} {moedaGlobal} {valorFormatado.toFixed(2)}
-                </Text>
-                <TouchableOpacity onPress={() => deletarLancamento(item.id)} style={styles.btnDelete}>
-                  <Ionicons name="trash" size={18} color="#e74c3c" />
-                </TouchableOpacity>
-              </View>
+        renderItem={({ item }) => (
+          <View style={styles.itemCaixa}>
+            <Ionicons name={item.tipo === 'ENTRADA' ? 'arrow-up-circle' : 'arrow-down-circle'} size={24} color={item.tipo === 'ENTRADA' ? '#2ecc71' : '#e74c3c'} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={{ fontWeight: 'bold' }}>{item.descricao}</Text>
+              <Text style={{ fontSize: 12, color: '#7f8c8d' }}>{new Date(item.created_at).toLocaleDateString('pt-BR')}</Text>
             </View>
-          );
-        }}
-        ListEmptyComponent={
-          <Text style={{ textAlign: 'center', color: '#95a5a6', marginTop: 20 }}>Nenhuma movimentação neste período.</Text>
-        }
+            <Text style={{ fontWeight: 'bold', color: item.tipo === 'ENTRADA' ? '#2ecc71' : '#e74c3c' }}>{formatarMoeda(item.valor, moedaGlobal)}</Text>
+          </View>
+        )}
       />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f8f9fa', paddingHorizontal: 20 },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#2c3e50', marginTop: 20 },
-  subtitle: { fontSize: 14, color: '#7f8c8d', marginBottom: 20 },
-  card: { backgroundColor: '#2ecc71', padding: 20, borderRadius: 15, alignItems: 'center', elevation: 3, marginBottom: 14 },
-  cardTitle: { color: '#fff', fontSize: 16, opacity: 0.9, marginBottom: 5 },
-  saldoText: { color: '#fff', fontSize: 36, fontWeight: 'bold' },
-
-  btnLucros: {
-    backgroundColor: '#8e44ad',
-    borderRadius: 15,
-    padding: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-    elevation: 4,
-    shadowColor: '#8e44ad',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-  btnLucrosLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  btnLucrosTitulo: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
-  btnLucrosSubtitulo: { color: 'rgba(255,255,255,0.75)', fontSize: 12, marginTop: 2 },
-
-  form: { backgroundColor: '#fff', padding: 20, borderRadius: 15, elevation: 2, marginBottom: 20 },
-  label: { fontSize: 16, color: '#34495e', fontWeight: 'bold', marginBottom: 15 },
-  labelMini: { fontSize: 12, color: '#7f8c8d', marginBottom: 5, fontWeight: 'bold' },
-  rowTipos: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15 },
-  btnTipo: { flex: 1, padding: 10, borderRadius: 8, alignItems: 'center', backgroundColor: '#ecf0f1', marginHorizontal: 5 },
-  btnTipoEntrada: { backgroundColor: '#2ecc71' },
-  btnTipoSaida: { backgroundColor: '#e74c3c' },
-  inputDescricao: { borderWidth: 1, borderColor: '#bdc3c7', borderRadius: 8, padding: 12, fontSize: 16, backgroundColor: '#fafafa' },
-  input: { borderWidth: 1, borderColor: '#bdc3c7', borderRadius: 8, padding: 12, fontSize: 18 },
-  btnAdicionar: { padding: 15, borderRadius: 8, flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
-  btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-
-  filterBar: { flexDirection: 'row', alignItems: 'center', marginBottom: 15, paddingHorizontal: 5 },
-  filterChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 15, backgroundColor: '#ecf0f1', marginRight: 8 },
-  filterChipAtivo: { backgroundColor: '#3498db' },
-  filterText: { color: '#7f8c8d', fontSize: 12, fontWeight: 'bold' },
-  filterTextAtivo: { color: '#fff' },
-
-  historyItem: { flexDirection: 'row', backgroundColor: '#fff', padding: 15, borderRadius: 12, marginBottom: 10, alignItems: 'center', elevation: 1 },
-  historyInfo: { flex: 1, marginLeft: 15 },
-  historyDesc: { fontWeight: 'bold', fontSize: 15, color: '#2c3e50' },
-  historyDate: { fontSize: 11, color: '#95a5a6', marginTop: 2 },
-  historyRight: { alignItems: 'flex-end', flexDirection: 'row' },
-  historyValor: { fontWeight: 'bold', fontSize: 16 },
-  btnDelete: { marginLeft: 10, padding: 5, backgroundColor: '#fbeee6', borderRadius: 5 },
-
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
-  modalPdf: { width: '85%', backgroundColor: '#fff', borderRadius: 15, padding: 25, elevation: 10 },
-  modalPdfTitle: { fontSize: 20, fontWeight: 'bold', color: '#2c3e50', textAlign: 'center', marginBottom: 5 },
-  modalPdfSub: { fontSize: 14, color: '#7f8c8d', textAlign: 'center', marginBottom: 20 },
-  btnPdfOption: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f0f3f5', padding: 15, borderRadius: 10, marginBottom: 10 },
-  btnPdfOptionText: { fontSize: 16, fontWeight: 'bold', color: '#2c3e50', marginLeft: 10 },
-  btnPdfCancel: { marginTop: 10, padding: 10 },
-  btnPdfCancelText: { color: '#e74c3c', fontSize: 16, fontWeight: 'bold', textAlign: 'center' },
-  inputData: { borderWidth: 1, borderColor: '#bdc3c7', borderRadius: 8, padding: 12, fontSize: 16, marginBottom: 15, textAlign: 'center', backgroundColor: '#f9f9f9', color: '#2c3e50' },
-
-  modalLucrosContainer: { flex: 1, backgroundColor: '#f4f6f9' },
-  modalLucrosHeader: {
-    backgroundColor: '#8e44ad', paddingHorizontal: 20, paddingVertical: 16,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-  },
+  container: { flex: 1, backgroundColor: '#f8f9fa', padding: 16 },
+  headerSimples: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  labelSaldo: { fontSize: 12, color: '#7f8c8d', fontWeight: 'bold' },
+  saldoText: { fontSize: 32, fontWeight: 'bold' },
+  diretorAcoes: { flexDirection: 'row', gap: 10, marginBottom: 20 },
+  btnAcaoDir: { flex: 1, backgroundColor: '#3498db', padding: 12, borderRadius: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  btnAcaoDirText: { color: '#fff', fontWeight: 'bold' },
+  form: { backgroundColor: '#fff', padding: 16, borderRadius: 14, elevation: 2, marginBottom: 20 },
+  formTitle: { fontWeight: 'bold', marginBottom: 12 },
+  rowTipos: { flexDirection: 'row', gap: 10, marginBottom: 12 },
+  tipoBtn: { flex: 1, padding: 10, borderRadius: 8, backgroundColor: '#f1f2f6', alignItems: 'center' },
+  tipoBtnAtivo: { backgroundColor: '#dfe4ea' },
+  input: { borderBottomWidth: 1, borderBottomColor: '#dfe4ea', padding: 10, marginBottom: 12 },
+  btnLancar: { backgroundColor: '#2ecc71', padding: 14, borderRadius: 10, alignItems: 'center' },
+  listaTitle: { fontWeight: 'bold', fontSize: 16, marginBottom: 12 },
+  itemCaixa: { flexDirection: 'row', backgroundColor: '#fff', padding: 14, borderRadius: 12, marginBottom: 8, alignItems: 'center' },
+  modalLucrosContainer: { flex: 1, backgroundColor: '#f8f9fa' },
+  modalLucrosHeader: { backgroundColor: '#8e44ad', padding: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   btnVoltar: { padding: 4 },
-  modalLucrosTitulo: { color: '#fff', fontSize: 18, fontWeight: 'bold', flex: 1, textAlign: 'center' },
-  btnPdfHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
-
-  cardLucroPrincipal: {
-    margin: 16, backgroundColor: '#6c3483', borderRadius: 18, padding: 22,
-    elevation: 6, shadowColor: '#6c3483', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 10,
-  },
-  cardLucroLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 14, marginBottom: 6 },
-  cardLucroValor: { color: '#fff', fontSize: 34, fontWeight: 'bold', marginBottom: 16 },
-  cardLucroRow: { flexDirection: 'row' },
-  cardLucroMini: { flex: 1, paddingLeft: 12 },
-  cardLucroMiniLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11, marginBottom: 3 },
-  cardLucroMiniValor: { fontSize: 17, fontWeight: 'bold' },
-
-  gridIndicadores: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, marginBottom: 8 },
-  indicadorCard: {
-    width: '30%', margin: '1.6%', backgroundColor: '#fff', borderRadius: 12,
-    padding: 14, alignItems: 'center', elevation: 2,
-  },
-  indicadorValor: { fontSize: 14, fontWeight: 'bold', color: '#2c3e50', marginVertical: 4, textAlign: 'center' },
-  indicadorLabel: { fontSize: 10, color: '#95a5a6', textAlign: 'center' },
-
-  // Comissionados resumo
-  comissionadosCard: {
-    marginHorizontal: 16, marginBottom: 14, backgroundColor: '#fff',
-    borderRadius: 14, padding: 16, elevation: 2, borderLeftWidth: 4, borderLeftColor: '#8e44ad',
-  },
-  comissionadosHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  comissionadosTitle: { fontSize: 14, fontWeight: 'bold', color: '#6c3483', marginLeft: 8 },
-  comissionadoRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f1f2f6' },
-  comissionadoAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#8e44ad', justifyContent: 'center', alignItems: 'center' },
-  comissionadoAvatarText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
-  comissionadoNome: { fontSize: 14, fontWeight: 'bold', color: '#2c3e50' },
-  comissionadoPago: { fontSize: 12, color: '#27ae60', marginTop: 2 },
-  comissionadoAcordado: { fontSize: 14, fontWeight: 'bold', color: '#8e44ad' },
-  comissionadoLabel: { fontSize: 10, color: '#7f8c8d' },
-
-  filtroLucrosBar: { paddingHorizontal: 16, marginBottom: 14 },
-  filtroChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: '#ecf0f1', marginRight: 8 },
+  modalLucrosTitulo: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  btnPdfHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
+  cardLucroPrincipal: { backgroundColor: '#8e44ad', margin: 16, padding: 20, borderRadius: 16, elevation: 4 },
+  cardLucroLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 14 },
+  cardLucroValor: { color: '#fff', fontSize: 32, fontWeight: 'bold', marginVertical: 10 },
+  cardLucroRow: { flexDirection: 'row', marginTop: 10 },
+  cardLucroMini: { flex: 1 },
+  cardLucroMiniLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11 },
+  cardLucroMiniValor: { fontSize: 16, fontWeight: 'bold', marginTop: 2 },
+  gridIndicadores: { flexDirection: 'row', flexWrap: 'wrap', padding: 8 },
+  indicadorCard: { width: '45%', backgroundColor: '#fff', margin: '2.5%', padding: 15, borderRadius: 14, elevation: 2 },
+  indicadorValor: { fontSize: 14, fontWeight: 'bold', marginVertical: 4 },
+  indicadorLabel: { fontSize: 10, color: '#7f8c8d' },
+  comissionadosCard: { backgroundColor: '#fff', margin: 16, borderRadius: 14, padding: 16, elevation: 2 },
+  comissionadosHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+  comissionadosTitle: { marginLeft: 8, fontWeight: 'bold', color: '#2c3e50' },
+  comissionadoRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  comissionadoAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#f1f2f6', justifyContent: 'center', alignItems: 'center' },
+  comissionadoAvatarText: { fontWeight: 'bold', color: '#8e44ad' },
+  comissionadoNome: { fontWeight: 'bold', fontSize: 13 },
+  comissionadoPago: { fontSize: 11, color: '#7f8c8d' },
+  comissionadoAcordado: { fontWeight: 'bold', fontSize: 13, color: '#2c3e50' },
+  comissionadoLabel: { fontSize: 9, color: '#bdc3c7', textTransform: 'uppercase' },
+  filtroLucrosBar: { paddingHorizontal: 16, marginBottom: 15 },
+  filtroChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: '#ecf0f1', marginRight: 8 },
   filtroChipText: { fontSize: 12, fontWeight: 'bold', color: '#7f8c8d' },
-
-  empCard: {
-    marginHorizontal: 16, marginBottom: 14, backgroundColor: '#fff',
-    borderRadius: 14, padding: 18, elevation: 2,
-  },
-  empCabecalho: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 },
-  empNome: { fontSize: 17, fontWeight: 'bold', color: '#2c3e50' },
-  badgeStatus: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
-  badgeStatusText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
-  empData: { fontSize: 11, color: '#95a5a6', marginBottom: 14 },
-
-  empGrid: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
-  empGridItem: { width: '33.33%', marginBottom: 10, paddingRight: 8 },
-  empGridLabel: { fontSize: 10, color: '#95a5a6', marginBottom: 2 },
-  empGridValor: { fontSize: 13, fontWeight: 'bold', color: '#2c3e50' },
-
-  progressoContainer: { borderTopWidth: 1, borderTopColor: '#f0f0f0', paddingTop: 12 },
-  progressoInfo: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  progressoText: { fontSize: 11, color: '#7f8c8d' },
-  progressoBar: { height: 6, backgroundColor: '#ecf0f1', borderRadius: 3, overflow: 'hidden' },
-  progressoFill: { height: '100%', borderRadius: 3 },
+  empCard: { backgroundColor: '#fff', marginHorizontal: 16, marginBottom: 12, borderRadius: 14, padding: 16, elevation: 2 },
+  empCabecalho: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  empNome: { fontWeight: 'bold', fontSize: 15 },
+  badgeStatus: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  badgeStatusText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  empData: { fontSize: 11, color: '#bdc3c7', marginTop: 4, marginBottom: 12 },
+  empGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  empGridItem: { width: '33.33%', marginBottom: 10 },
+  empGridLabel: { fontSize: 9, color: '#bdc3c7', textTransform: 'uppercase' },
+  empGridValor: { fontSize: 12, fontWeight: 'bold' },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  modalPdf: { backgroundColor: '#fff', width: '85%', padding: 20, borderRadius: 16 },
+  modalPdfTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 15 },
+  btnPdfOption: { padding: 12, backgroundColor: '#f1f2f6', borderRadius: 10, marginBottom: 8 },
+  btnPdfOptionText: { fontWeight: 'bold' },
+  btnPdfCancel: { marginTop: 10, alignItems: 'center' },
+  btnPdfCancelText: { color: '#e74c3c', fontWeight: 'bold' }
 });

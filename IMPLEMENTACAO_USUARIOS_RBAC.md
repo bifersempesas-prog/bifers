@@ -5,20 +5,27 @@
 Foram criados os seguintes arquivos para implementar o novo sistema de usuários com controle de acesso:
 
 ### Hooks
+
 - **`hooks/useUsuarios.ts`** — Hook para gerenciar autenticação e permissões de usuários
 
 ### Contextos
+
 - **`contexts/AuthContext.tsx`** — Contexto global para manter o usuário logado
 
 ### Modais
+
 - **`components/modals/ModalGerenciarUsuarios.tsx`** — Modal para o DIRETOR gerenciar usuários
+
 - **`components/modals/ModalReciboProlabore.tsx`** — Modal para gerar recibos de pró-labore (PDF)
 
 ### Telas
+
 - **`app/login_novo.tsx`** — Nova tela de login com suporte a múltiplos usuários
+
 - **`app/(tabs)/perfil_novo.tsx`** — Novo perfil com informações de permissões
 
 ### Documentação
+
 - **`SISTEMA_USUARIOS_RBAC.md`** — Documentação completa do novo sistema
 
 ---
@@ -27,9 +34,11 @@ Foram criados os seguintes arquivos para implementar o novo sistema de usuários
 
 ### Passo 1: Criar a Tabela `usuarios` no Supabase
 
-1. Abra o painel do **Supabase** (https://app.supabase.com)
-2. Vá para **SQL Editor**
-3. Execute o seguinte SQL:
+1. Abra o painel do **Supabase** ([https://app.supabase.com](https://app.supabase.com) )
+
+1. Vá para **SQL Editor**
+
+1. Execute o seguinte SQL:
 
 ```sql
 CREATE TABLE usuarios (
@@ -66,6 +75,7 @@ INSERT INTO usuarios (nome, email, senha, perfil, ativo) VALUES
 #### 3.1 Substituir o Login
 
 Renomeie os arquivos:
+
 ```bash
 # Backup do login antigo
 mv app/login.tsx app/login_antigo.tsx
@@ -77,6 +87,7 @@ mv app/login_novo.tsx app/login.tsx
 #### 3.2 Substituir o Perfil
 
 Renomeie os arquivos:
+
 ```bash
 # Backup do perfil antigo
 mv app/(tabs)/perfil.tsx app/(tabs)/perfil_antigo.tsx
@@ -173,32 +184,49 @@ export default function MinhaTelaComponent() {
 ## 🔐 Fluxo de Login
 
 1. **Usuário abre o app**
-2. **Vê a tela de "Conversor USD/BRL"** (disfarce de segurança)
-3. **Digita "777" no campo "Valor em Dólar"** para desbloquear
-4. **Aparece a área secreta com campos de Email e Senha**
-5. **Digita suas credenciais** (exemplo: joao@bifers.com / senha123)
-6. **Clica em "ENTRAR"**
-7. **Sistema valida no Supabase**
-8. **Se correto, redireciona para o Dashboard**
-9. **Se incorreto, mostra erro e limpa os campos**
+
+1. **Vê a tela de "Conversor USD/BRL"** (disfarce de segurança)
+
+1. **Digita "777" no campo "Valor em Dólar"** para desbloquear
+
+1. **Aparece a área secreta com campos de Email e Senha**
+
+1. **Digita suas credenciais** (exemplo: [joao@bifers.com](mailto:joao@bifers.com) / senha123)
+
+1. **Clica em "ENTRAR"**
+
+1. **Sistema valida no Supabase**
+
+1. **Se correto, redireciona para o Dashboard**
+
+1. **Se incorreto, mostra erro e limpa os campos**
 
 ---
 
 ## 🎯 Permissões por Perfil
 
 ### DIRETOR 🔐
+
 - ✅ Tudo
 
 ### LANÇADOR 🚀
+
 - ✅ Criar empréstimos
+
 - ✅ Registrar pagamentos
+
 - ❌ Gerenciar usuários
+
 - ❌ Gerar recibos de pró-labore
 
 ### CADASTRADOR 📝
+
 - ✅ Cadastrar clientes
+
 - ✅ Cadastrar comissionados
+
 - ❌ Criar empréstimos
+
 - ❌ Gerenciar usuários
 
 ---
@@ -206,43 +234,65 @@ export default function MinhaTelaComponent() {
 ## 🧪 Testando o Sistema
 
 ### Teste 1: Login com DIRETOR
+
 1. Email: `joao@bifers.com`
-2. Senha: `senha123`
-3. Esperado: Acesso total ao sistema
+
+1. Senha: `senha123`
+
+1. Esperado: Acesso total ao sistema
 
 ### Teste 2: Login com LANÇADOR
+
 1. Email: `maria@bifers.com`
-2. Senha: `senha456`
-3. Esperado: Botão de "Novo Empréstimo" visível, mas "Gerenciar Usuários" não
+
+1. Senha: `senha456`
+
+1. Esperado: Botão de "Novo Empréstimo" visível, mas "Gerenciar Usuários" não
 
 ### Teste 3: Login com CADASTRADOR
+
 1. Email: `pedro@bifers.com`
-2. Senha: `senha789`
-3. Esperado: Botão de "Novo Cliente" visível, mas "Novo Empréstimo" não
+
+1. Senha: `senha789`
+
+1. Esperado: Botão de "Novo Cliente" visível, mas "Novo Empréstimo" não
 
 ### Teste 4: Gerar Recibo (DIRETOR)
+
 1. Logar como DIRETOR
-2. Ir para tela **Caixa**
-3. Clicar em **"Recibos de Pró-Labore"**
-4. Selecionar tipo (Consolidado, Por Comissionado, Lucro do Diretor)
-5. Clicar em **"GERAR PDF"**
-6. Esperado: PDF é gerado e compartilhado
+
+1. Ir para tela **Caixa**
+
+1. Clicar em **"Recibos de Pró-Labore"**
+
+1. Selecionar tipo (Consolidado, Por Comissionado, Lucro do Diretor)
+
+1. Clicar em **"GERAR PDF"**
+
+1. Esperado: PDF é gerado e compartilhado
 
 ---
 
 ## ⚠️ Pontos Importantes
 
 ### Segurança
+
 - **Em produção**, as senhas devem ser hasheadas com **bcrypt** no backend
+
 - O `VALOR_SECRETO = '777'` é apenas um disfarce básico
+
 - Implementar **Row Level Security (RLS)** no Supabase para segurança real
 
 ### Persistência de Sessão
+
 - Atualmente, o usuário é perdido ao fechar o app
+
 - Para manter a sessão, salvar o usuário em `AsyncStorage` ou `SecureStore`
 
 ### Backup de Senhas
+
 - Não há sistema de "esqueci a senha" implementado
+
 - O DIRETOR deve gerenciar as senhas dos usuários
 
 ---
@@ -250,38 +300,57 @@ export default function MinhaTelaComponent() {
 ## 📞 Troubleshooting
 
 ### Problema: "Usuário não encontrado ou inativo"
+
 **Solução:** Verifique se:
+
 1. O email está correto (case-sensitive)
-2. O usuário está ativo (`ativo = true`)
-3. A tabela `usuarios` foi criada no Supabase
+
+1. O usuário está ativo (`ativo = true`)
+
+1. A tabela `usuarios` foi criada no Supabase
 
 ### Problema: "Senha incorreta"
+
 **Solução:** Verifique se:
+
 1. A senha está correta (case-sensitive)
-2. Não há espaços extras antes/depois da senha
+
+1. Não há espaços extras antes/depois da senha
 
 ### Problema: Botão de "Recibos" não aparece
+
 **Solução:** Verifique se:
+
 1. Você está logado como DIRETOR
-2. O modal foi adicionado corretamente na tela Caixa
-3. O usuário tem `perfil = 'DIRETOR'` no banco de dados
+
+1. O modal foi adicionado corretamente na tela Caixa
+
+1. O usuário tem `perfil = 'DIRETOR'` no banco de dados
 
 ---
 
 ## 🚀 Próximas Melhorias
 
 - [ ] Implementar hash de senhas com bcrypt
+
 - [ ] Adicionar Row Level Security (RLS)
+
 - [ ] Criar sistema de auditoria (log de ações)
+
 - [ ] Implementar "Esqueci a senha"
+
 - [ ] Adicionar 2FA (autenticação de dois fatores)
+
 - [ ] Salvar sessão em AsyncStorage
+
 - [ ] Integrar com OAuth (Google, Microsoft)
 
 ---
 
 ## 📚 Referências
 
-- Documentação do Supabase: https://supabase.com/docs
-- Documentação do Expo: https://docs.expo.dev
-- React Native Docs: https://reactnative.dev/docs/getting-started
+- Documentação do Supabase: [https://supabase.com/docs](https://supabase.com/docs)
+
+- Documentação do Expo: [https://docs.expo.dev](https://docs.expo.dev)
+
+- React Native Docs: [https://reactnative.dev/docs/getting-started](https://reactnative.dev/docs/getting-started)

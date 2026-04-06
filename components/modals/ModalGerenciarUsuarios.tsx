@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useUsuarios, PerfilUsuario } from '../../hooks/useUsuarios';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface Props {
   visivel: boolean;
@@ -12,7 +13,8 @@ interface Props {
 }
 
 export default function ModalGerenciarUsuarios({ visivel, onClose }: Props) {
-  const { usuarios, loading, criarUsuario, desativarUsuario, listarUsuarios, usuarioAtual } = useUsuarios();
+  const { usuarios, loading, criarUsuario, desativarUsuario, listarUsuarios } = useUsuarios();
+  const { usuarioAtual } = useAuth();
 
   const [novoNome, setNovoNome] = useState('');
   const [novoEmail, setNovoEmail] = useState('');

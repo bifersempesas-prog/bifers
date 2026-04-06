@@ -10,10 +10,12 @@ import ModalPastaCliente from '../../components/modals/ModalPastaCliente';
 import { useMoeda } from '../../hooks/useMoeda';
 import { useEmprestimos } from '../../hooks/useEmprestimos';
 import { formatarMoeda } from '../../utils/formatters';
+import { useAuth } from '../../contexts/AuthContext';
 
 export default function CarteiraScreen() {
   const { moedaGlobal } = useMoeda();
   const { contratos, totais, loading, carregarDados } = useEmprestimos();
+  const { usuarioAtual, temPermissao } = useAuth();
 
   const [modalNovoAberto, setModalNovoAberto] = useState(false);
   const [modalDetalhesAberto, setModalDetalhesAberto] = useState(false);
@@ -73,14 +75,24 @@ export default function CarteiraScreen() {
     <SafeAreaView style={styles.container}>
       <ToggleMoeda />
 
-      <DashboardCard
-        moeda={moedaGlobal}
-        ativo={totais.ativo}
-        lucro={totais.lucro}
-        comissao={totais.comissao}
-        receber={totais.receber}
-        totalEmprestado={totais.emprestado}
-      />
+      {temPermissao(['DIRETOR', 'LANÇADOR']) ? (
+        <DashboardCard
+          moeda={moedaGlobal}
+          ativo={totais.ativo}
+          lucro={totais.lucro}
+          comissao={totais.comissao}
+          receber={totais.receber}
+          totalEmprestado={totais.emprestado}
+        />
+      ) : (
+        <View style={[styles.pastaCard, { padding: 20, backgroundColor: '#8e44ad', marginBottom: 20 }]}>
+          <Ionicons name="person" size={30} color="#fff" />
+          <View style={{ marginLeft: 15 }}>
+            <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 18 }}>Olá, {usuarioAtual?.nome}</Text>
+            <Text style={{ color: 'rgba(255,255,255,0.8)', fontSize: 12 }}>Perfil: Cadastrador</Text>
+          </View>
+        </View>
+      )}
 
       <View style={styles.sectionHeader}>
         <View>
@@ -157,6 +169,10 @@ export default function CarteiraScreen() {
         pasta={pastaSelecionada}
         onClose={() => setModalPastaAberto(false)}
         onNovoEmprestimo={(cliente: any) => {
+          if (!temPermissao(['DIRETOR', 'LANÇADOR'])) {
+            Alert.alert('Acesso Negado', 'Seu perfil não permite lançar empréstimos.');
+            return;
+          }
           setClienteParaNovoEmprestimo(cliente || pastaSelecionada?.clienteData);
           setModalNovoAberto(true);
         }}

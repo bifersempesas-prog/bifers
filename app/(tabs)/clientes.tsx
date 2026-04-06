@@ -7,9 +7,11 @@ import { useClientes } from '../../hooks/useClientes';
 import { supabase } from '../../lib/supabase';
 import ModalNovoCliente from '../../components/modals/ModalNovoCliente';
 import ModalNovoComissionado from '../../components/modals/ModalNovoComissionado';
+import { useAuth } from '../../contexts/AuthContext';
 
 export default function CadastrosScreen() {
   const { moedaGlobal } = useMoeda();
+  const { temPermissao } = useAuth();
   // Puxando as funções de exclusão do seu hook atualizado
   const { listarClientes, excluirCliente, excluirComissionado, loading: loadingCli } = useClientes();
   
@@ -108,40 +110,44 @@ export default function CadastrosScreen() {
                 </Text>
               </View>
 
-              {/* BOTÕES DE AÇÃO */}
-              <View style={styles.containerAcoes}>
-                <TouchableOpacity 
-                  style={styles.botaoAcao} 
-                  onPress={() => {
-                    setItemParaEditar(item);
-                    abaAtiva === 'CLIENTES' ? setModalCliente(true) : setModalParceiro(true);
-                  }}
-                >
-                  <Ionicons name="pencil" size={20} color="#f39c12" />
-                </TouchableOpacity>
+              {/* BOTÕES DE AÇÃO (Apenas DIRETOR e CADASTRADOR) */}
+              {temPermissao(['DIRETOR', 'CADASTRADOR']) && (
+                <View style={styles.containerAcoes}>
+                  <TouchableOpacity 
+                    style={styles.botaoAcao} 
+                    onPress={() => {
+                      setItemParaEditar(item);
+                      abaAtiva === 'CLIENTES' ? setModalCliente(true) : setModalParceiro(true);
+                    }}
+                  >
+                    <Ionicons name="pencil" size={20} color="#f39c12" />
+                  </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={styles.botaoAcao} 
-                  onPress={() => confirmarExclusao(item)}
-                >
-                  <Ionicons name="trash" size={20} color="#e74c3c" />
-                </TouchableOpacity>
-              </View>
+                  <TouchableOpacity 
+                    style={styles.botaoAcao} 
+                    onPress={() => confirmarExclusao(item)}
+                  >
+                    <Ionicons name="trash" size={20} color="#e74c3c" />
+                  </TouchableOpacity>
+                </View>
+              )}
             </View>
           )}
         />
       )}
 
-      {/* BOTÃO FLUTUANTE DINÂMICO */}
-      <TouchableOpacity 
-        style={styles.fab} 
-        onPress={() => {
-          setItemParaEditar(null); // Limpa para indicar que é um NOVO cadastro
-          abaAtiva === 'CLIENTES' ? setModalCliente(true) : setModalParceiro(true);
-        }}
-      >
-        <Ionicons name="add" size={30} color="#fff" />
-      </TouchableOpacity>
+      {/* BOTÃO FLUTUANTE DINÂMICO (Apenas DIRETOR e CADASTRADOR) */}
+      {temPermissao(['DIRETOR', 'CADASTRADOR']) && (
+        <TouchableOpacity 
+          style={styles.fab} 
+          onPress={() => {
+            setItemParaEditar(null); // Limpa para indicar que é um NOVO cadastro
+            abaAtiva === 'CLIENTES' ? setModalCliente(true) : setModalParceiro(true);
+          }}
+        >
+          <Ionicons name="add" size={30} color="#fff" />
+        </TouchableOpacity>
+      )}
 
       <ModalNovoCliente 
         visivel={modalCliente} 

@@ -1,17 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, KeyboardAvoidingView, Platform, ImageBackground, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, KeyboardAvoidingView, Platform, ImageBackground, ScrollView, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter, Stack } from 'expo-router'; // <-- Adicionado o Stack aqui
+import { useRouter, Stack } from 'expo-router';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function LoginScreen() {
   const router = useRouter();
+  const { login, loading } = useAuth();
   
   // Estados do Conversor (O Disfarce)
   const [cotacao, setCotacao] = useState('5.00'); 
   const [valorUSD, setValorUSD] = useState('');   
   
   // Estados Secretos (O Cofre)
+  const [email, setEmail] = useState('');
   const [senha, setSenha] = useState('');
   const [desbloqueado, setDesbloqueado] = useState(false);
   const [esconderSenha, setEsconderSenha] = useState(true);
@@ -20,7 +23,6 @@ export default function LoginScreen() {
   // CONFIGURAÇÕES DE SEGURANÇA
   // ==========================================
   const VALOR_SECRETO = '777'; 
-  const SENHA_APP = 'axoryn2026'; 
   // ==========================================
 
   // Cálculo funcional do conversor
@@ -31,23 +33,28 @@ export default function LoginScreen() {
       setDesbloqueado(true);
     } else {
       setDesbloqueado(false);
+      setEmail('');
       setSenha(''); 
       setEsconderSenha(true);
     }
   }, [valorUSD]);
 
-  const handleEntrar = () => {
-    if (senha === SENHA_APP) {
+  const handleEntrar = async () => {
+    if (!email || !senha) {
+      Alert.alert('Erro', 'Preencha email e senha.');
+      return;
+    }
+
+    const res = await login(email, senha);
+    if (res.sucesso) {
       router.replace('/(tabs)');
     } else {
-      Alert.alert('Acesso Negado', 'Senha incorreta.');
-      setSenha('');
+      Alert.alert('Acesso Negado', res.error || 'Credenciais incorretas.');
     }
   };
 
   return (
     <>
-      {/* ESSA LINHA AQUI ESCONDE A PALAVRA "LOGIN" NO TOPO DA TELA */}
       <Stack.Screen options={{ headerShown: false }} />
 
       <ImageBackground 
@@ -102,10 +109,22 @@ export default function LoginScreen() {
                   <View style={styles.secretBox}>
                     <Text style={styles.secretTitle}>Acesso Restrito</Text>
                     
-                    <View style={styles.passwordContainer}>
+                    <View style={styles.inputContainer}>
                       <TextInput
                         style={styles.secretInput}
-                        placeholder="Senha do Sistema"
+                        placeholder="Seu Email"
+                        keyboardType="email-address"
+                        autoCapitalize="none"
+                        value={email}
+                        onChangeText={setEmail}
+                        placeholderTextColor="#95a5a6"
+                      />
+                    </View>
+
+                    <View style={styles.inputContainer}>
+                      <TextInput
+                        style={styles.secretInput}
+                        placeholder="Sua Senha"
                         secureTextEntry={esconderSenha}
                         value={senha}
                         onChangeText={setSenha}
@@ -123,8 +142,16 @@ export default function LoginScreen() {
                       </TouchableOpacity>
                     </View>
 
-                    <TouchableOpacity style={styles.btnAcessar} onPress={handleEntrar}>
-                      <Text style={styles.btnText}>ENTRAR</Text>
+                    <TouchableOpacity 
+                      style={[styles.btnAcessar, loading && { opacity: 0.7 }]} 
+                      onPress={handleEntrar}
+                      disabled={loading}
+                    >
+                      {loading ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <Text style={styles.btnText}>ENTRAR</Text>
+                      )}
                     </TouchableOpacity>
                   </View>
                 )}
@@ -182,7 +209,7 @@ const styles = StyleSheet.create({
     borderColor: '#3498db'
   },
   secretTitle: { color: '#3498db', fontSize: 14, fontWeight: 'bold', textAlign: 'center', marginBottom: 15, textTransform: 'uppercase' },
-  passwordContainer: {
+  inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
@@ -192,7 +219,7 @@ const styles = StyleSheet.create({
   secretInput: { 
     flex: 1,
     padding: 15, 
-    fontSize: 18, 
+    fontSize: 16, 
     color: '#2c3e50',
     fontWeight: 'bold'
   },
@@ -201,7 +228,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#3498db', 
     padding: 15, 
     borderRadius: 8, 
-    alignItems: 'center' 
+    alignItems: 'center',
+    minHeight: 55,
+    justifyContent: 'center'
   },
   btnText: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
 });
