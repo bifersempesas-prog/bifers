@@ -145,8 +145,8 @@ export default function ModalNovoEmprestimo({ visivel, onClose, onSuccess, clien
         valor_recebido: 0,
         lucro_registrado: 0,
         capital_recuperado: 0,
-        comissao_paga: valorTotalComissao,
-        created_at: dataInicio.toISOString() // <--- MOVIMENTAÇÃO TAMBÉM SEGUE A DATA MANUAL
+        comissao_paga: 0,
+        created_at: dataInicio.toISOString() // <--- COMISSÃO SÓ É REGISTRADA NO PAGAMENTO
       }).select().single();
 
       if (errMov) throw errMov;

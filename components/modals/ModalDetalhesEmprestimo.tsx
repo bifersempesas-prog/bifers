@@ -100,10 +100,13 @@ export default function ModalDetalhesEmprestimo({ visivel, contrato, onClose, on
   }, [contrato]);
 
   // ─── Comissão proporcional para o pagamento atual ────────────────────────
+  // Calcula comissão POR PARCELA, não duplica com pagamentos anteriores
   const comissaoProporcionalPagamento = useMemo(() => {
     if (!contrato || detalhesComissao.length === 0) return 0;
     const qtd = contrato.quantidade_parcelas || 1;
+    const vParcela = contrato.valor_parcela || contrato.saldo_devedor / qtd;
     const totalComissaoContrato = detalhesComissao.reduce((acc: number, c: any) => acc + c.totalAcordado, 0);
+    // Comissão por parcela = total / quantidade de parcelas
     return totalComissaoContrato / qtd;
   }, [contrato, detalhesComissao]);
 
@@ -132,8 +135,10 @@ export default function ModalDetalhesEmprestimo({ visivel, contrato, onClose, on
     }
 
     // Calcula a comissão proporcional ao valor pago
-    const proporcaoPaga = valorNum / valorDaParcela;
-    const comissaoCalculada = comissaoProporcionalPagamento * Math.min(proporcaoPaga, 1);
+    // Se pagar menos que uma parcela, comissão é proporcional
+    // Se pagar uma parcela completa, comissão é uma parcela completa
+    const proporcaoPaga = Math.min(valorNum / valorDaParcela, 1);
+    const comissaoCalculada = comissaoProporcionalPagamento * proporcaoPaga;
 
     const res = await registrarPagamento(contrato, valorNum, jurosNum, comissaoCalculada, dataPgto);
 

@@ -92,10 +92,20 @@ export const useEmprestimos = () => {
       // 1. GARANTIA DE NÚMEROS (Evita que o banco trave por causa de texto)
       const vPago = Number(valorPago) || 0;
       const vJuros = Number(jurosPagos) || 0;
-      const vComissao = Number(comissao) || 0;
+      let vComissao = Number(comissao) || 0;
 
       if (vPago <= 0) {
         throw new Error("O valor pago precisa ser maior que zero!");
+      }
+
+      // VALIDAÇÃO: Comissão não pode ser negativa ou excessivamente alta
+      if (vComissao < 0) {
+        vComissao = 0;
+      }
+      // Limita comissão a 50% do valor pago (sanidade check)
+      if (vComissao > vPago * 0.5) {
+        console.warn(`Comissão ajustada de ${vComissao} para ${vPago * 0.5} (limite de 50%)`);
+        vComissao = vPago * 0.5;
       }
 
       // CONVERSÃO DA DATA MANUAL (SE EXISTIR) PARA O FORMATO DO BANCO DE DADOS
