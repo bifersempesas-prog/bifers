@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "Bifers",
+    "slug": "bifers",
+    "scheme": "bifers",
+    "version": "1.0.0",
+    "newArchEnabled": false,
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.jorge.bifers"
+    },
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}
