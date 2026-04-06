@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   Alert, ActivityIndicator, FlatList, ScrollView, Modal
@@ -12,26 +12,40 @@ import * as Sharing from 'expo-sharing';
 import { formatarMoeda } from '../../utils/formatters';
 import { useFocusEffect } from '@react-navigation/native';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TIPOS
-// ─────────────────────────────────────────────────────────────────────────────
 type PeriodoPDF = 'TUDO' | 'HOJE' | 'MES' | 'CUSTOM';
 type TipoLancamento = 'ENTRADA' | 'SAIDA';
 
-interface EmprestimoItem {
+// ─── Estrutura real do contrato com dados relacionados ───────────────────────
+interface ContratoRelatorio {
   id: string;
-  devedor_nome: string;
+  cliente_id: string;
   valor_principal: number;
-  valor_total: number;
-  juros_percentual: number;
-  parcelas_total: number;
-  parcelas_pagas: number;
-  status: string;         // 'ATIVO' | 'QUITADO' | 'ATRASADO'
+  saldo_devedor: number;
+  taxa_juros: number;
+  tipo_juros: string;
+  frequencia: string;
+  quantidade_parcelas: number;
+  valor_parcela: number;
+  status: string;
   created_at: string;
   moeda: string;
-  // Campos opcionais que podem existir na sua tabela
-  comissao_percentual?: number;
-  descricao?: string;
+  numero_contrato?: string;
+  garantia?: string;
+  comissionados_detalhes?: any[];
+  // Dados calculados após JOIN
+  nomeCliente: string;
+  telefoneCliente: string;
+  // Dados calculados a partir de movimentações
+  jurosRecebidos: number;
+  comissoesPagas: number;
+  qtdPagamentos: number;
+}
+
+// ─── Estrutura de comissão por parceiro ──────────────────────────────────────
+interface ResumoComissionado {
+  nome: string;
+  totalAcordado: number;
+  totalPago: number;
 }
 
 export default function CaixaScreen() {
@@ -57,9 +71,10 @@ export default function CaixaScreen() {
 
   // ── Modal de Lucros / Comissões ────────────────────────────────────────────
   const [modalLucrosVisivel, setModalLucrosVisivel] = useState(false);
-  const [listaEmprestimos, setListaEmprestimos] = useState<EmprestimoItem[]>([]);
+  const [listaContratos, setListaContratos] = useState<ContratoRelatorio[]>([]);
+  const [resumoComissionados, setResumoComissionados] = useState<ResumoComissionado[]>([]);
   const [loadingLucros, setLoadingLucros] = useState(false);
-  const [filtroLucros, setFiltroLucros] = useState<'TODOS' | 'ATIVO' | 'QUITADO' | 'ATRASADO'>('TODOS');
+  const [filtroLucros, setFiltroLucros] = useState<'TODOS' | 'ATIVO' | 'QUITADO'>('TODOS');
   const [modalPdfLucrosVisivel, setModalPdfLucrosVisivel] = useState(false);
   const [mostrarFormCustomLucros, setMostrarFormCustomLucros] = useState(false);
   const [dataInicioLucros, setDataInicioLucros] = useState('');
@@ -94,21 +109,92 @@ export default function CaixaScreen() {
   };
 
   // ─────────────────────────────────────────────────────────────────────────
-  // LUCROS / COMISSÕES — carga de dados
+  // LUCROS / COMISSÕES — carga de dados REAL
   // ─────────────────────────────────────────────────────────────────────────
   const carregarLucros = async () => {
     setLoadingLucros(true);
     try {
-      const { data, error } = await supabase
+      // 1. Buscar contratos da moeda ativa
+      const { data: contratos, error: errContratos } = await supabase
         .from('contratos')
         .select('*')
         .eq('moeda', moedaGlobal)
         .order('created_at', { ascending: false });
 
-      if (error) console.error('Erro ao buscar empréstimos:', error);
-      if (data) setListaEmprestimos(data as EmprestimoItem[]);
-    } catch (e) {
-      console.error(e);
+      if (errContratos) throw errContratos;
+      if (!contratos || contratos.length === 0) {
+        setListaContratos([]);
+        setResumoComissionados([]);
+        return;
+      }
+
+      // 2. Buscar clientes para ter os nomes
+      const clienteIds = [...new Set(contratos.map(c => c.cliente_id).filter(Boolean))];
+      const { data: clientes } = await supabase
+        .from('clientes')
+        .select('id, nome, telefone')
+        .in('id', clienteIds);
+
+      const mapaClientes: Record<string, any> = {};
+      clientes?.forEach(c => { mapaClientes[c.id] = c; });
+
+      // 3. Buscar movimentações reais (juros e comissões já pagos)
+      const contratoIds = contratos.map(c => c.id);
+      const { data: movs } = await supabase
+        .from('movimentacoes_contrato')
+        .select('contrato_id, valor_juros_pago, comissao_paga, tipo_acao')
+        .in('contrato_id', contratoIds)
+        .eq('tipo_acao', 'PAGAMENTO');
+
+      // Agrupa movimentações por contrato
+      const mapaMovs: Record<string, { juros: number; comissao: number; qtd: number }> = {};
+      movs?.forEach(m => {
+        if (!mapaMovs[m.contrato_id]) {
+          mapaMovs[m.contrato_id] = { juros: 0, comissao: 0, qtd: 0 };
+        }
+        mapaMovs[m.contrato_id].juros += Number(m.valor_juros_pago) || 0;
+        mapaMovs[m.contrato_id].comissao += Number(m.comissao_paga) || 0;
+        mapaMovs[m.contrato_id].qtd += 1;
+      });
+
+      // 4. Montar lista enriquecida
+      const listaEnriquecida: ContratoRelatorio[] = contratos.map(c => {
+        const cliente = mapaClientes[c.cliente_id] || {};
+        const movContrato = mapaMovs[c.id] || { juros: 0, comissao: 0, qtd: 0 };
+        return {
+          ...c,
+          nomeCliente: cliente.nome || 'Cliente não encontrado',
+          telefoneCliente: cliente.telefone || '',
+          jurosRecebidos: movContrato.juros,
+          comissoesPagas: movContrato.comissao,
+          qtdPagamentos: movContrato.qtd,
+        };
+      });
+
+      setListaContratos(listaEnriquecida);
+
+      // 5. Calcular resumo por comissionado a partir de comissionados_detalhes
+      const mapaComissionados: Record<string, ResumoComissionado> = {};
+      listaEnriquecida.forEach(c => {
+        const detalhes = c.comissionados_detalhes || [];
+        const qtd = c.quantidade_parcelas || 1;
+        detalhes.forEach((d: any) => {
+          const nome = d.nome || 'Parceiro';
+          const totalAcordado = d.tipoComissao === 'PERCENTUAL'
+            ? (Number(c.valor_principal) * (Number(d.valorDigitado) / 100))
+            : Number(d.valorDigitado);
+          if (!mapaComissionados[nome]) {
+            mapaComissionados[nome] = { nome, totalAcordado: 0, totalPago: 0 };
+          }
+          mapaComissionados[nome].totalAcordado += totalAcordado;
+          mapaComissionados[nome].totalPago += c.comissoesPagas / Math.max(detalhes.length, 1);
+        });
+      });
+      setResumoComissionados(Object.values(mapaComissionados));
+
+    } catch (e: any) {
+      console.error('Erro ao carregar lucros:', e.message);
+      Alert.alert('Erro', 'Não foi possível carregar os dados de lucros.');
     } finally {
       setLoadingLucros(false);
     }
@@ -120,8 +206,6 @@ export default function CaixaScreen() {
     }, [moedaGlobal])
   );
 
-  useEffect(() => { carregarSaldo(); }, [moedaGlobal]);
-
   // ─────────────────────────────────────────────────────────────────────────
   // HELPERS
   // ─────────────────────────────────────────────────────────────────────────
@@ -132,54 +216,42 @@ export default function CaixaScreen() {
     setFunc(t.substring(0, 10));
   };
 
-  // Lucro = valor total pago esperado − capital emprestado
-  const calcularLucroEmprestimo = (emp: EmprestimoItem): number => {
-    const totalEsperado = Number(emp.valor_total) || 0;
-    const principal = Number(emp.valor_principal) || 0;
-    return totalEsperado - principal;
+  // Lucro previsto total de um contrato = (parcelas × valor_parcela) - principal
+  const calcularLucroPrevisto = (c: ContratoRelatorio): number => {
+    const totalEsperado = (c.quantidade_parcelas || 1) * (c.valor_parcela || 0);
+    const lucro = totalEsperado - Number(c.valor_principal);
+    return lucro > 0 ? lucro : 0;
   };
 
-  // Lucro já recebido = proporção de parcelas pagas
-  const calcularLucroRecebido = (emp: EmprestimoItem): number => {
-    const lucroTotal = calcularLucroEmprestimo(emp);
-    const pagas = Number(emp.parcelas_pagas) || 0;
-    const total = Number(emp.parcelas_total) || 1;
-    return (lucroTotal / total) * pagas;
+  // Lucro a receber = previsto - já recebido
+  const calcularLucroAReceber = (c: ContratoRelatorio): number => {
+    return Math.max(calcularLucroPrevisto(c) - c.jurosRecebidos, 0);
   };
 
-  // Comissão (se houver campo comissao_percentual)
-  const calcularComissao = (emp: EmprestimoItem): number => {
-    const perc = Number(emp.comissao_percentual) || 0;
-    return (Number(emp.valor_principal) * perc) / 100;
-  };
-
-  // Totais consolidados
+  // Totais consolidados usando dados reais
   const totaisLucros = useCallback(() => {
-    const lista = listaEmprestimos.filter(e => e.moeda === moedaGlobal);
-    return lista.reduce(
-      (acc, emp) => {
-        acc.capitalTotal += Number(emp.valor_principal) || 0;
-        acc.lucroTotal += calcularLucroEmprestimo(emp);
-        acc.lucroRecebido += calcularLucroRecebido(emp);
-        acc.comissaoTotal += calcularComissao(emp);
-        acc.qtdAtivos += emp.status === 'ATIVO' ? 1 : 0;
-        acc.qtdQuitados += emp.status === 'QUITADO' ? 1 : 0;
-        acc.qtdAtrasados += emp.status === 'ATRASADO' ? 1 : 0;
+    return listaContratos.reduce(
+      (acc, c) => {
+        acc.capitalTotal += Number(c.valor_principal) || 0;
+        acc.lucroTotal += calcularLucroPrevisto(c);
+        acc.lucroRecebido += c.jurosRecebidos;
+        acc.comissaoTotal += c.comissoesPagas;
+        acc.qtdAtivos += c.status === 'ATIVO' ? 1 : 0;
+        acc.qtdQuitados += c.status === 'QUITADO' ? 1 : 0;
         return acc;
       },
-      { capitalTotal: 0, lucroTotal: 0, lucroRecebido: 0, comissaoTotal: 0, qtdAtivos: 0, qtdQuitados: 0, qtdAtrasados: 0 }
+      { capitalTotal: 0, lucroTotal: 0, lucroRecebido: 0, comissaoTotal: 0, qtdAtivos: 0, qtdQuitados: 0 }
     );
-  }, [listaEmprestimos, moedaGlobal]);
+  }, [listaContratos]);
 
-  const listaEmpFiltrada = listaEmprestimos.filter(e => {
+  const listaFiltrada = listaContratos.filter(c => {
     if (filtroLucros === 'TODOS') return true;
-    return e.status === filtroLucros;
+    return c.status === filtroLucros;
   });
 
   const corStatus = (s: string) => {
     if (s === 'ATIVO') return '#3498db';
     if (s === 'QUITADO') return '#2ecc71';
-    if (s === 'ATRASADO') return '#e74c3c';
     return '#95a5a6';
   };
 
@@ -231,7 +303,7 @@ export default function CaixaScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // FILTRO LISTA CAIXA
   // ─────────────────────────────────────────────────────────────────────────
-  const listaFiltrada = listaCaixa.filter(item => {
+  const listaCaixaFiltrada = listaCaixa.filter(item => {
     if (filtroPeriodo === 'TUDO') return true;
     const dataItem = new Date(item.created_at);
     const hoje = new Date();
@@ -282,19 +354,7 @@ export default function CaixaScreen() {
       return curr.tipo === 'ENTRADA' ? acc + v : acc - v;
     }, 0);
 
-    const html = gerarHTMLCaixa(listaParaPDF, saldoDoPeriodo, tituloPeriodo);
-
-    try {
-      const { uri } = await Print.printToFileAsync({ html, base64: false });
-      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Relatorio_Caixa_${moedaGlobal}.pdf` });
-    } catch {
-      Alert.alert('Erro', 'Não foi possível gerar ou compartilhar o PDF.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const gerarHTMLCaixa = (lista: any[], saldoPeriodo: number, titulo: string) => `
+    const html = `
     <html><head><style>
       body{font-family:Helvetica,sans-serif;padding:20px;color:#2c3e50}
       .header{text-align:center;border-bottom:2px solid #3498db;padding-bottom:20px;margin-bottom:30px}
@@ -314,32 +374,42 @@ export default function CaixaScreen() {
       <div class="header">
         <h1>Relatório de Caixa — Bifers</h1>
         <p class="info"><strong>Moeda:</strong> ${moedaGlobal}</p>
-        <p class="info"><strong>Período:</strong> ${titulo}</p>
+        <p class="info"><strong>Período:</strong> ${tituloPeriodo}</p>
         <p class="info"><strong>Gerado em:</strong> ${new Date().toLocaleString('pt-BR')}</p>
       </div>
       <table>
         <thead><tr><th width="20%">Data e Hora</th><th width="45%">Descrição</th><th width="15%">Tipo</th><th width="20%">Valor</th></tr></thead>
         <tbody>
-          ${lista.map(item => `
+          ${listaParaPDF.map(item => `
             <tr>
               <td>${new Date(item.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
               <td>${item.descricao || '-'}</td>
               <td class="${item.tipo === 'ENTRADA' ? 'entrada' : 'saida'}">${item.tipo}</td>
               <td style="font-weight:bold;text-align:right">${item.tipo === 'ENTRADA' ? '+' : '-'} ${formatarMoeda(item.valor, moedaGlobal)}</td>
             </tr>`).join('')}
-          ${lista.length === 0 ? '<tr><td colspan="4" style="text-align:center;padding:30px;color:#95a5a6">Nenhuma movimentação neste período.</td></tr>' : ''}
+          ${listaParaPDF.length === 0 ? '<tr><td colspan="4" style="text-align:center;padding:30px;color:#95a5a6">Nenhuma movimentação neste período.</td></tr>' : ''}
         </tbody>
       </table>
       <div class="total">
         <span class="total-label">Movimentação Líquida do Período:</span>
-        <span class="total-value">${formatarMoeda(saldoPeriodo, moedaGlobal)}</span>
+        <span class="total-value">${formatarMoeda(saldoDoPeriodo, moedaGlobal)}</span>
         <span style="font-size:11px;color:#95a5a6;display:block;margin-top:4px">Saldo total geral disponível: ${formatarMoeda(saldo, moedaGlobal)}</span>
       </div>
       <div class="footer">Documento gerado automaticamente por Bifers.</div>
     </body></html>`;
 
+    try {
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Relatorio_Caixa_${moedaGlobal}.pdf` });
+    } catch {
+      Alert.alert('Erro', 'Não foi possível gerar ou compartilhar o PDF.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // ─────────────────────────────────────────────────────────────────────────
-  // PDF — LUCROS / COMISSÕES
+  // PDF — LUCROS / COMISSÕES (usando dados reais)
   // ─────────────────────────────────────────────────────────────────────────
   const gerarPDFLucros = async (periodoEscolhido: PeriodoPDF) => {
     let startDate: Date = new Date(), endDate: Date = new Date();
@@ -362,7 +432,7 @@ export default function CaixaScreen() {
     setLoadingLucros(true);
 
     const hoje = new Date();
-    const listaParaPDF = listaEmprestimos.filter(item => {
+    const listaParaPDF = listaContratos.filter(item => {
       if (periodoEscolhido === 'TUDO') return true;
       const dataItem = new Date(item.created_at);
       if (periodoEscolhido === 'HOJE') return dataItem.toDateString() === hoje.toDateString();
@@ -371,36 +441,52 @@ export default function CaixaScreen() {
       return true;
     });
 
-    // Calcular totais do período
-    const totaisPeriodo = listaParaPDF.reduce((acc, emp) => {
-      acc.capital += Number(emp.valor_principal) || 0;
-      acc.lucroTotal += calcularLucroEmprestimo(emp);
-      acc.lucroRecebido += calcularLucroRecebido(emp);
-      acc.comissao += calcularComissao(emp);
+    const totaisPeriodo = listaParaPDF.reduce((acc, c) => {
+      acc.capital += Number(c.valor_principal) || 0;
+      acc.lucroPrevisto += calcularLucroPrevisto(c);
+      acc.lucroRecebido += c.jurosRecebidos;
+      acc.comissao += c.comissoesPagas;
       return acc;
-    }, { capital: 0, lucroTotal: 0, lucroRecebido: 0, comissao: 0 });
+    }, { capital: 0, lucroPrevisto: 0, lucroRecebido: 0, comissao: 0 });
+
+    // Resumo por comissionado no período
+    const mapaComPeriodo: Record<string, { nome: string; acordado: number; pago: number }> = {};
+    listaParaPDF.forEach(c => {
+      const detalhes = c.comissionados_detalhes || [];
+      detalhes.forEach((d: any) => {
+        const nome = d.nome || 'Parceiro';
+        const acordado = d.tipoComissao === 'PERCENTUAL'
+          ? (Number(c.valor_principal) * (Number(d.valorDigitado) / 100))
+          : Number(d.valorDigitado);
+        if (!mapaComPeriodo[nome]) mapaComPeriodo[nome] = { nome, acordado: 0, pago: 0 };
+        mapaComPeriodo[nome].acordado += acordado;
+        mapaComPeriodo[nome].pago += c.comissoesPagas / Math.max(detalhes.length, 1);
+      });
+    });
+    const comissionadosPeriodo = Object.values(mapaComPeriodo);
 
     const html = `
     <html><head><style>
       body{font-family:Helvetica,sans-serif;padding:20px;color:#2c3e50;font-size:13px}
       .header{text-align:center;border-bottom:3px solid #8e44ad;padding-bottom:18px;margin-bottom:28px}
       h1{color:#8e44ad;font-size:20px;text-transform:uppercase;margin-bottom:4px}
+      h2{color:#6c3483;font-size:15px;margin:28px 0 12px}
       .info{color:#7f8c8d;font-size:12px;margin:2px 0}
       .cards{display:flex;gap:12px;margin-bottom:28px;flex-wrap:wrap}
-      .card{flex:1;min-width:130px;background:#f8f9fa;border-radius:8px;padding:14px;border-top:4px solid #8e44ad;text-align:center}
-      .card-label{font-size:11px;color:#7f8c8d;text-transform:uppercase;margin-bottom:6px}
-      .card-value{font-size:18px;font-weight:bold;color:#2c3e50}
+      .card{flex:1;min-width:120px;background:#f8f9fa;border-radius:8px;padding:14px;border-top:4px solid #8e44ad;text-align:center}
+      .card-label{font-size:10px;color:#7f8c8d;text-transform:uppercase;margin-bottom:6px}
+      .card-value{font-size:17px;font-weight:bold;color:#2c3e50}
       .card-value.verde{color:#27ae60}
       .card-value.azul{color:#2980b9}
       .card-value.laranja{color:#e67e22}
+      .card-value.roxo{color:#8e44ad}
       table{width:100%;border-collapse:collapse;margin-top:10px}
-      th,td{border:1px solid #ecf0f1;padding:10px 12px;text-align:left;font-size:11px}
+      th,td{border:1px solid #ecf0f1;padding:9px 11px;text-align:left;font-size:11px}
       th{background:#f0eaf6;color:#6c3483;font-weight:bold;text-transform:uppercase}
       tr:nth-child(even){background:#fcfcfc}
       .status{display:inline-block;padding:3px 8px;border-radius:10px;font-size:10px;font-weight:bold;color:#fff}
       .s-ativo{background:#2980b9}
       .s-quitado{background:#27ae60}
-      .s-atrasado{background:#c0392b}
       .num{text-align:right;font-weight:bold}
       .lucro{color:#27ae60}
       .capital{color:#2980b9}
@@ -408,7 +494,8 @@ export default function CaixaScreen() {
       .summary{margin-top:24px;background:#f8f9fa;border-radius:8px;padding:18px;border-left:5px solid #8e44ad}
       .summary-title{font-size:14px;font-weight:bold;color:#6c3483;margin-bottom:14px}
       .summary-row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #ecf0f1;font-size:13px}
-      .summary-row:last-child{border-bottom:none;font-size:15px;font-weight:bold;color:#2c3e50}
+      .summary-row:last-child{border-bottom:none;font-size:15px;font-weight:bold}
+      .com-table{margin-top:10px}
       .footer{margin-top:36px;text-align:center;font-size:10px;color:#bdc3c7;border-top:1px solid #ecf0f1;padding-top:10px}
     </style></head><body>
       <div class="header">
@@ -417,94 +504,121 @@ export default function CaixaScreen() {
         <p class="info"><strong>Gerado em:</strong> ${new Date().toLocaleString('pt-BR')}</p>
       </div>
 
-      <!-- CARDS RESUMO -->
       <div class="cards">
         <div class="card">
-          <div class="card-label">Capital Emprestado</div>
+          <div class="card-label">Capital em Risco</div>
           <div class="card-value azul">${formatarMoeda(totaisPeriodo.capital, moedaGlobal)}</div>
         </div>
         <div class="card">
-          <div class="card-label">Lucro Previsto Total</div>
-          <div class="card-value verde">${formatarMoeda(totaisPeriodo.lucroTotal, moedaGlobal)}</div>
+          <div class="card-label">Lucro Previsto</div>
+          <div class="card-value verde">${formatarMoeda(totaisPeriodo.lucroPrevisto, moedaGlobal)}</div>
         </div>
         <div class="card">
-          <div class="card-label">Lucro Já Recebido</div>
+          <div class="card-label">Lucro Recebido</div>
           <div class="card-value verde">${formatarMoeda(totaisPeriodo.lucroRecebido, moedaGlobal)}</div>
         </div>
         <div class="card">
-          <div class="card-label">Total de Contratos</div>
+          <div class="card-label">Lucro a Receber</div>
+          <div class="card-value laranja">${formatarMoeda(totaisPeriodo.lucroPrevisto - totaisPeriodo.lucroRecebido, moedaGlobal)}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Comissões Pagas</div>
+          <div class="card-value roxo">${formatarMoeda(totaisPeriodo.comissao, moedaGlobal)}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Contratos</div>
           <div class="card-value">${listaParaPDF.length}</div>
         </div>
       </div>
 
-      <!-- TABELA DETALHADA -->
+      <h2>Detalhamento por Contrato</h2>
       <table>
         <thead>
           <tr>
-            <th>Devedor</th>
+            <th>Cliente</th>
             <th>Data</th>
             <th>Capital</th>
-            <th>Juros %</th>
+            <th>Frequência</th>
             <th>Lucro Previsto</th>
-            <th>Lucro Recebido</th>
-            <th>Parcelas</th>
+            <th>Juros Recebidos</th>
+            <th>Comissão Paga</th>
             <th>Status</th>
           </tr>
         </thead>
         <tbody>
-          ${listaParaPDF.map(emp => {
-            const lucroT = calcularLucroEmprestimo(emp);
-            const lucroR = calcularLucroRecebido(emp);
-            const pagas = Number(emp.parcelas_pagas) || 0;
-            const total = Number(emp.parcelas_total) || 0;
+          ${listaParaPDF.map(c => {
+            const lucroP = calcularLucroPrevisto(c);
             return `
             <tr>
-              <td><strong>${emp.devedor_nome || '-'}</strong></td>
-              <td>${new Date(emp.created_at).toLocaleDateString('pt-BR')}</td>
-              <td class="num capital">${formatarMoeda(emp.valor_principal, moedaGlobal)}</td>
-              <td class="num">${(Number(emp.juros_percentual) || 0).toFixed(1)}%</td>
-              <td class="num lucro">+ ${formatarMoeda(lucroT, moedaGlobal)}</td>
-              <td class="num lucro">+ ${formatarMoeda(lucroR, moedaGlobal)}</td>
-              <td style="text-align:center">${pagas}/${total}</td>
-              <td><span class="status s-${(emp.status || '').toLowerCase()}">${emp.status || '-'}</span></td>
+              <td><strong>${c.nomeCliente}</strong></td>
+              <td>${new Date(c.created_at).toLocaleDateString('pt-BR')}</td>
+              <td class="num capital">${formatarMoeda(c.valor_principal, moedaGlobal)}</td>
+              <td>${c.frequencia || '-'} (${c.quantidade_parcelas || 0}x)</td>
+              <td class="num lucro">+ ${formatarMoeda(lucroP, moedaGlobal)}</td>
+              <td class="num lucro">+ ${formatarMoeda(c.jurosRecebidos, moedaGlobal)}</td>
+              <td class="num comissao">${formatarMoeda(c.comissoesPagas, moedaGlobal)}</td>
+              <td><span class="status s-${(c.status || '').toLowerCase()}">${c.status || '-'}</span></td>
             </tr>`;
           }).join('')}
-          ${listaParaPDF.length === 0 ? '<tr><td colspan="8" style="text-align:center;padding:28px;color:#95a5a6">Nenhum empréstimo neste período.</td></tr>' : ''}
+          ${listaParaPDF.length === 0 ? '<tr><td colspan="8" style="text-align:center;padding:28px;color:#95a5a6">Nenhum contrato neste período.</td></tr>' : ''}
         </tbody>
       </table>
 
-      <!-- SUMÁRIO FINANCEIRO -->
+      ${comissionadosPeriodo.length > 0 ? `
+      <h2>Comissões por Parceiro</h2>
+      <table class="com-table">
+        <thead>
+          <tr>
+            <th>Parceiro</th>
+            <th>Comissão Total Acordada</th>
+            <th>Comissão Já Paga</th>
+            <th>Comissão a Pagar</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${comissionadosPeriodo.map(com => `
+          <tr>
+            <td><strong>${com.nome}</strong></td>
+            <td class="num comissao">${formatarMoeda(com.acordado, moedaGlobal)}</td>
+            <td class="num" style="color:#27ae60">${formatarMoeda(com.pago, moedaGlobal)}</td>
+            <td class="num" style="color:#e67e22">${formatarMoeda(Math.max(com.acordado - com.pago, 0), moedaGlobal)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>` : ''}
+
       <div class="summary">
         <div class="summary-title">Resumo Financeiro do Período</div>
         <div class="summary-row">
-          <span>Total de Capital Emprestado</span>
+          <span>Capital Total Emprestado</span>
           <span style="color:#2980b9;font-weight:bold">${formatarMoeda(totaisPeriodo.capital, moedaGlobal)}</span>
         </div>
         <div class="summary-row">
           <span>Lucro Previsto (juros totais)</span>
-          <span style="color:#27ae60;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroTotal, moedaGlobal)}</span>
+          <span style="color:#27ae60;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroPrevisto, moedaGlobal)}</span>
         </div>
         <div class="summary-row">
-          <span>Lucro Já Recebido (parcelas pagas)</span>
+          <span>Lucro Já Recebido (juros pagos)</span>
           <span style="color:#27ae60;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroRecebido, moedaGlobal)}</span>
         </div>
         <div class="summary-row">
-          <span>Lucro a Receber (pendente)</span>
-          <span style="color:#e67e22;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroTotal - totaisPeriodo.lucroRecebido, moedaGlobal)}</span>
+          <span>Lucro a Receber</span>
+          <span style="color:#e67e22;font-weight:bold">+ ${formatarMoeda(totaisPeriodo.lucroPrevisto - totaisPeriodo.lucroRecebido, moedaGlobal)}</span>
         </div>
         <div class="summary-row">
-          <span>Retorno Total Esperado (capital + juros)</span>
-          <span>${formatarMoeda(totaisPeriodo.capital + totaisPeriodo.lucroTotal, moedaGlobal)}</span>
+          <span>Total de Comissões Pagas</span>
+          <span style="color:#8e44ad;font-weight:bold">- ${formatarMoeda(totaisPeriodo.comissao, moedaGlobal)}</span>
+        </div>
+        <div class="summary-row">
+          <span>Lucro Líquido (recebido - comissões)</span>
+          <span style="color:#2c3e50">${formatarMoeda(totaisPeriodo.lucroRecebido - totaisPeriodo.comissao, moedaGlobal)}</span>
         </div>
       </div>
 
       <div class="footer">Documento gerado automaticamente por Bifers — Administração Financeira.</div>
     </body></html>`;
 
-    const htmlFinal = html;
-
     try {
-      const { uri } = await Print.printToFileAsync({ html: htmlFinal, base64: false });
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
       await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf', dialogTitle: `Relatorio_Lucros_${moedaGlobal}.pdf` });
     } catch {
       Alert.alert('Erro', 'Não foi possível gerar ou compartilhar o PDF.');
@@ -522,7 +636,6 @@ export default function CaixaScreen() {
     <Modal visible={modalLucrosVisivel} animationType="slide" transparent={false}>
       <SafeAreaView style={styles.modalLucrosContainer}>
 
-        {/* Cabeçalho */}
         <View style={styles.modalLucrosHeader}>
           <TouchableOpacity onPress={() => setModalLucrosVisivel(false)} style={styles.btnVoltar}>
             <Ionicons name="arrow-back" size={22} color="#fff" />
@@ -538,18 +651,14 @@ export default function CaixaScreen() {
         </View>
 
         <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 30 }}>
-
-          {/* Cards de Resumo */}
           {loadingLucros ? (
             <ActivityIndicator color="#8e44ad" size="large" style={{ marginTop: 40 }} />
           ) : (
             <>
-              {/* Card principal */}
+              {/* Card principal de lucro */}
               <View style={styles.cardLucroPrincipal}>
                 <Text style={styles.cardLucroLabel}>Lucro Total Previsto</Text>
-                <Text style={styles.cardLucroValor}>
-                  {formatarMoeda(totais.lucroTotal, moedaGlobal)}
-                </Text>
+                <Text style={styles.cardLucroValor}>{formatarMoeda(totais.lucroTotal, moedaGlobal)}</Text>
                 <View style={styles.cardLucroRow}>
                   <View style={styles.cardLucroMini}>
                     <Text style={styles.cardLucroMiniLabel}>Já Recebido</Text>
@@ -571,14 +680,19 @@ export default function CaixaScreen() {
                 <View style={styles.indicadorCard}>
                   <Ionicons name="cash-outline" size={22} color="#2980b9" />
                   <Text style={styles.indicadorValor}>{formatarMoeda(totais.capitalTotal, moedaGlobal)}</Text>
-                  <Text style={styles.indicadorLabel}>Capital Total Emprestado</Text>
+                  <Text style={styles.indicadorLabel}>Capital Total</Text>
                 </View>
                 <View style={styles.indicadorCard}>
                   <Ionicons name="trending-up-outline" size={22} color="#8e44ad" />
                   <Text style={styles.indicadorValor}>
                     {totais.capitalTotal > 0 ? ((totais.lucroTotal / totais.capitalTotal) * 100).toFixed(1) + '%' : '0%'}
                   </Text>
-                  <Text style={styles.indicadorLabel}>Rentabilidade Média</Text>
+                  <Text style={styles.indicadorLabel}>Rentabilidade</Text>
+                </View>
+                <View style={styles.indicadorCard}>
+                  <Ionicons name="people-outline" size={22} color="#e67e22" />
+                  <Text style={[styles.indicadorValor, { color: '#e67e22' }]}>{formatarMoeda(totais.comissaoTotal, moedaGlobal)}</Text>
+                  <Text style={styles.indicadorLabel}>Comissões Pagas</Text>
                 </View>
                 <View style={styles.indicadorCard}>
                   <Ionicons name="checkmark-circle-outline" size={22} color="#2ecc71" />
@@ -591,103 +705,127 @@ export default function CaixaScreen() {
                   <Text style={styles.indicadorLabel}>Ativos</Text>
                 </View>
                 <View style={styles.indicadorCard}>
-                  <Ionicons name="alert-circle-outline" size={22} color="#e74c3c" />
-                  <Text style={[styles.indicadorValor, { color: '#e74c3c' }]}>{totais.qtdAtrasados}</Text>
-                  <Text style={styles.indicadorLabel}>Atrasados</Text>
-                </View>
-                <View style={styles.indicadorCard}>
-                  <Ionicons name="document-outline" size={22} color="#7f8c8d" />
-                  <Text style={styles.indicadorValor}>{listaEmprestimos.length}</Text>
-                  <Text style={styles.indicadorLabel}>Total de Contratos</Text>
+                  <Ionicons name="calculator-outline" size={22} color="#7f8c8d" />
+                  <Text style={styles.indicadorValor}>{formatarMoeda(totais.lucroRecebido - totais.comissaoTotal, moedaGlobal)}</Text>
+                  <Text style={styles.indicadorLabel}>Lucro Líquido</Text>
                 </View>
               </View>
 
+              {/* Resumo por comissionado */}
+              {resumoComissionados.length > 0 && (
+                <View style={styles.comissionadosCard}>
+                  <View style={styles.comissionadosHeader}>
+                    <Ionicons name="people" size={18} color="#8e44ad" />
+                    <Text style={styles.comissionadosTitle}>Comissões por Parceiro</Text>
+                  </View>
+                  {resumoComissionados.map((com, idx) => (
+                    <View key={idx} style={styles.comissionadoRow}>
+                      <View style={styles.comissionadoAvatar}>
+                        <Text style={styles.comissionadoAvatarText}>{com.nome[0].toUpperCase()}</Text>
+                      </View>
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <Text style={styles.comissionadoNome}>{com.nome}</Text>
+                        <Text style={styles.comissionadoPago}>Pago: {formatarMoeda(com.totalPago, moedaGlobal)}</Text>
+                      </View>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={styles.comissionadoAcordado}>{formatarMoeda(com.totalAcordado, moedaGlobal)}</Text>
+                        <Text style={styles.comissionadoLabel}>acordado</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              )}
+
               {/* Filtro de status */}
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filtroLucrosBar}>
-                {(['TODOS', 'ATIVO', 'QUITADO', 'ATRASADO'] as const).map(f => (
+                {(['TODOS', 'ATIVO', 'QUITADO'] as const).map(f => (
                   <TouchableOpacity
                     key={f}
                     onPress={() => setFiltroLucros(f)}
-                    style={[styles.filtroChip, filtroLucros === f && { backgroundColor: corStatus(f) === '#95a5a6' ? '#2c3e50' : corStatus(f) }]}
+                    style={[styles.filtroChip, filtroLucros === f && { backgroundColor: f === 'TODOS' ? '#2c3e50' : corStatus(f) }]}
                   >
                     <Text style={[styles.filtroChipText, filtroLucros === f && { color: '#fff' }]}>{f}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
 
-              {/* Lista de empréstimos */}
-              {listaEmpFiltrada.length === 0 ? (
-                <Text style={{ textAlign: 'center', color: '#95a5a6', marginTop: 30 }}>Nenhum empréstimo encontrado.</Text>
+              {/* Lista de contratos */}
+              {listaFiltrada.length === 0 ? (
+                <Text style={{ textAlign: 'center', color: '#95a5a6', marginTop: 30 }}>Nenhum contrato encontrado.</Text>
               ) : (
-                listaEmpFiltrada.map(emp => {
-                  const lucroT = calcularLucroEmprestimo(emp);
-                  const lucroR = calcularLucroRecebido(emp);
-                  const pagas = Number(emp.parcelas_pagas) || 0;
-                  const total = Number(emp.parcelas_total) || 1;
-                  const progressoPct = total > 0 ? (pagas / total) : 0;
+                listaFiltrada.map(c => {
+                  const lucroP = calcularLucroPrevisto(c);
+                  const lucroAR = calcularLucroAReceber(c);
+                  const progressoPct = lucroP > 0 ? Math.min(c.jurosRecebidos / lucroP, 1) : 0;
 
                   return (
-                    <View key={emp.id} style={styles.empCard}>
-                      {/* Linha 1: Nome + Status */}
+                    <View key={c.id} style={styles.empCard}>
                       <View style={styles.empCabecalho}>
-                        <Text style={styles.empNome}>{emp.devedor_nome || 'Devedor'}</Text>
-                        <View style={[styles.badgeStatus, { backgroundColor: corStatus(emp.status) }]}>
-                          <Text style={styles.badgeStatusText}>{emp.status}</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.empNome}>{c.nomeCliente}</Text>
+                          {c.telefoneCliente ? (
+                            <Text style={{ fontSize: 11, color: '#7f8c8d' }}>
+                              <Ionicons name="logo-whatsapp" size={11} color="#25D366" /> {c.telefoneCliente}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <View style={[styles.badgeStatus, { backgroundColor: corStatus(c.status) }]}>
+                          <Text style={styles.badgeStatusText}>{c.status}</Text>
                         </View>
                       </View>
 
-                      {/* Linha 2: Data */}
                       <Text style={styles.empData}>
-                        Emitido em {new Date(emp.created_at).toLocaleDateString('pt-BR')}
-                        {emp.descricao ? `  •  ${emp.descricao}` : ''}
+                        Emitido em {new Date(c.created_at).toLocaleDateString('pt-BR')}
+                        {c.frequencia ? `  •  ${c.frequencia}` : ''}
+                        {c.quantidade_parcelas ? `  •  ${c.quantidade_parcelas} parcelas` : ''}
                       </Text>
 
-                      {/* Grid de valores */}
                       <View style={styles.empGrid}>
                         <View style={styles.empGridItem}>
                           <Text style={styles.empGridLabel}>Capital</Text>
                           <Text style={[styles.empGridValor, { color: '#2980b9' }]}>
-                            {formatarMoeda(emp.valor_principal, moedaGlobal)}
+                            {formatarMoeda(c.valor_principal, moedaGlobal)}
                           </Text>
-                        </View>
-                        <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Juros</Text>
-                          <Text style={styles.empGridValor}>{(Number(emp.juros_percentual) || 0).toFixed(1)}%</Text>
                         </View>
                         <View style={styles.empGridItem}>
                           <Text style={styles.empGridLabel}>Lucro Previsto</Text>
                           <Text style={[styles.empGridValor, { color: '#27ae60' }]}>
-                            + {formatarMoeda(lucroT, moedaGlobal)}
+                            + {formatarMoeda(lucroP, moedaGlobal)}
                           </Text>
                         </View>
                         <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Lucro Recebido</Text>
+                          <Text style={styles.empGridLabel}>Juros Recebidos</Text>
                           <Text style={[styles.empGridValor, { color: '#27ae60' }]}>
-                            + {formatarMoeda(lucroR, moedaGlobal)}
+                            + {formatarMoeda(c.jurosRecebidos, moedaGlobal)}
                           </Text>
                         </View>
                         <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>A Receber</Text>
+                          <Text style={styles.empGridLabel}>Lucro a Receber</Text>
                           <Text style={[styles.empGridValor, { color: '#e67e22' }]}>
-                            + {formatarMoeda(lucroT - lucroR, moedaGlobal)}
+                            + {formatarMoeda(lucroAR, moedaGlobal)}
                           </Text>
                         </View>
                         <View style={styles.empGridItem}>
-                          <Text style={styles.empGridLabel}>Retorno Total</Text>
-                          <Text style={styles.empGridValor}>
-                            {formatarMoeda(Number(emp.valor_principal) + lucroT, moedaGlobal)}
+                          <Text style={styles.empGridLabel}>Comissão Paga</Text>
+                          <Text style={[styles.empGridValor, { color: '#8e44ad' }]}>
+                            {formatarMoeda(c.comissoesPagas, moedaGlobal)}
+                          </Text>
+                        </View>
+                        <View style={styles.empGridItem}>
+                          <Text style={styles.empGridLabel}>Saldo Devedor</Text>
+                          <Text style={[styles.empGridValor, { color: '#e74c3c' }]}>
+                            {formatarMoeda(c.saldo_devedor, moedaGlobal)}
                           </Text>
                         </View>
                       </View>
 
-                      {/* Barra de progresso das parcelas */}
                       <View style={styles.progressoContainer}>
                         <View style={styles.progressoInfo}>
-                          <Text style={styles.progressoText}>Parcelas: {pagas}/{total}</Text>
+                          <Text style={styles.progressoText}>Progresso do lucro</Text>
                           <Text style={styles.progressoText}>{(progressoPct * 100).toFixed(0)}% recebido</Text>
                         </View>
                         <View style={styles.progressoBar}>
-                          <View style={[styles.progressoFill, { width: `${progressoPct * 100}%` as any, backgroundColor: corStatus(emp.status) }]} />
+                          <View style={[styles.progressoFill, { width: `${progressoPct * 100}%` as any, backgroundColor: corStatus(c.status) }]} />
                         </View>
                       </View>
                     </View>
@@ -804,7 +942,7 @@ export default function CaixaScreen() {
       {renderModalLucros()}
 
       <FlatList
-        data={listaFiltrada}
+        data={listaCaixaFiltrada}
         keyExtractor={item => item.id}
         showsVerticalScrollIndicator={false}
         ListHeaderComponent={
@@ -822,7 +960,7 @@ export default function CaixaScreen() {
               )}
             </View>
 
-            {/* ── BOTÃO DE LUCROS / COMISSÕES ── */}
+            {/* Botão Lucros & Comissões */}
             <TouchableOpacity
               style={styles.btnLucros}
               onPress={() => {
@@ -834,7 +972,7 @@ export default function CaixaScreen() {
                 <Ionicons name="trending-up" size={28} color="#fff" />
                 <View style={{ marginLeft: 14 }}>
                   <Text style={styles.btnLucrosTitulo}>Lucros & Comissões</Text>
-                  <Text style={styles.btnLucrosSubtitulo}>Ver relatório detalhado por empréstimo</Text>
+                  <Text style={styles.btnLucrosSubtitulo}>Ver relatório detalhado por contrato</Text>
                 </View>
               </View>
               <Ionicons name="chevron-forward" size={22} color="rgba(255,255,255,0.7)" />
@@ -925,9 +1063,6 @@ export default function CaixaScreen() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ESTILOS
-// ─────────────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8f9fa', paddingHorizontal: 20 },
   title: { fontSize: 24, fontWeight: 'bold', color: '#2c3e50', marginTop: 20 },
@@ -936,7 +1071,6 @@ const styles = StyleSheet.create({
   cardTitle: { color: '#fff', fontSize: 16, opacity: 0.9, marginBottom: 5 },
   saldoText: { color: '#fff', fontSize: 36, fontWeight: 'bold' },
 
-  // Botão Lucros
   btnLucros: {
     backgroundColor: '#8e44ad',
     borderRadius: 15,
@@ -981,7 +1115,6 @@ const styles = StyleSheet.create({
   historyValor: { fontWeight: 'bold', fontSize: 16 },
   btnDelete: { marginLeft: 10, padding: 5, backgroundColor: '#fbeee6', borderRadius: 5 },
 
-  // Modal PDF
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
   modalPdf: { width: '85%', backgroundColor: '#fff', borderRadius: 15, padding: 25, elevation: 10 },
   modalPdfTitle: { fontSize: 20, fontWeight: 'bold', color: '#2c3e50', textAlign: 'center', marginBottom: 5 },
@@ -992,7 +1125,6 @@ const styles = StyleSheet.create({
   btnPdfCancelText: { color: '#e74c3c', fontSize: 16, fontWeight: 'bold', textAlign: 'center' },
   inputData: { borderWidth: 1, borderColor: '#bdc3c7', borderRadius: 8, padding: 12, fontSize: 16, marginBottom: 15, textAlign: 'center', backgroundColor: '#f9f9f9', color: '#2c3e50' },
 
-  // Modal Lucros
   modalLucrosContainer: { flex: 1, backgroundColor: '#f4f6f9' },
   modalLucrosHeader: {
     backgroundColor: '#8e44ad', paddingHorizontal: 20, paddingVertical: 16,
@@ -1018,8 +1150,23 @@ const styles = StyleSheet.create({
     width: '30%', margin: '1.6%', backgroundColor: '#fff', borderRadius: 12,
     padding: 14, alignItems: 'center', elevation: 2,
   },
-  indicadorValor: { fontSize: 18, fontWeight: 'bold', color: '#2c3e50', marginVertical: 4 },
+  indicadorValor: { fontSize: 14, fontWeight: 'bold', color: '#2c3e50', marginVertical: 4, textAlign: 'center' },
   indicadorLabel: { fontSize: 10, color: '#95a5a6', textAlign: 'center' },
+
+  // Comissionados resumo
+  comissionadosCard: {
+    marginHorizontal: 16, marginBottom: 14, backgroundColor: '#fff',
+    borderRadius: 14, padding: 16, elevation: 2, borderLeftWidth: 4, borderLeftColor: '#8e44ad',
+  },
+  comissionadosHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  comissionadosTitle: { fontSize: 14, fontWeight: 'bold', color: '#6c3483', marginLeft: 8 },
+  comissionadoRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f1f2f6' },
+  comissionadoAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#8e44ad', justifyContent: 'center', alignItems: 'center' },
+  comissionadoAvatarText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  comissionadoNome: { fontSize: 14, fontWeight: 'bold', color: '#2c3e50' },
+  comissionadoPago: { fontSize: 12, color: '#27ae60', marginTop: 2 },
+  comissionadoAcordado: { fontSize: 14, fontWeight: 'bold', color: '#8e44ad' },
+  comissionadoLabel: { fontSize: 10, color: '#7f8c8d' },
 
   filtroLucrosBar: { paddingHorizontal: 16, marginBottom: 14 },
   filtroChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: '#ecf0f1', marginRight: 8 },
@@ -1029,8 +1176,8 @@ const styles = StyleSheet.create({
     marginHorizontal: 16, marginBottom: 14, backgroundColor: '#fff',
     borderRadius: 14, padding: 18, elevation: 2,
   },
-  empCabecalho: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  empNome: { fontSize: 17, fontWeight: 'bold', color: '#2c3e50', flex: 1 },
+  empCabecalho: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 },
+  empNome: { fontSize: 17, fontWeight: 'bold', color: '#2c3e50' },
   badgeStatus: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
   badgeStatusText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
   empData: { fontSize: 11, color: '#95a5a6', marginBottom: 14 },
@@ -1038,7 +1185,7 @@ const styles = StyleSheet.create({
   empGrid: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
   empGridItem: { width: '33.33%', marginBottom: 10, paddingRight: 8 },
   empGridLabel: { fontSize: 10, color: '#95a5a6', marginBottom: 2 },
-  empGridValor: { fontSize: 14, fontWeight: 'bold', color: '#2c3e50' },
+  empGridValor: { fontSize: 13, fontWeight: 'bold', color: '#2c3e50' },
 
   progressoContainer: { borderTopWidth: 1, borderTopColor: '#f0f0f0', paddingTop: 12 },
   progressoInfo: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
